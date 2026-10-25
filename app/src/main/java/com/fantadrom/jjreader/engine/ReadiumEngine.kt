@@ -28,11 +28,12 @@ class ReadiumEngine(context: Context) {
     suspend fun open(file: File): Publication {
         val asset = assets.retrieve(file.toUrl(isDirectory = false)).getOrNull() ?: error("Не удалось распознать EPUB")
         val pub = opener.open(asset, allowUserInteraction = false, onCreatePublication = {
-            val html = manifest.readingOrder.filter { it.mediaType?.isHtml == true }.map { it.url().removeFragment() }.toSet() +
-                manifest.resources.filter { it.mediaType?.isHtml == true }.map { it.url().removeFragment() }
+            val html = (manifest.readingOrder + manifest.resources).filter { it.mediaType?.isHtml == true }
+                .associate { it.url().removeFragment() to checkNotNull(it.mediaType) }
             container = TransformingContainer(container) { url, resource ->
-                if (url.removeFragment() !in html) resource else TransformingResource(resource) { bytes ->
-                    Try.success(SafeHtml.transform(bytes.toString(Charsets.UTF_8)).toByteArray())
+                val mediaType = html[url.removeFragment()]
+                if (mediaType == null) resource else TransformingResource(resource) { bytes ->
+                    Try.success(SafeHtml.transform(bytes.toString(Charsets.UTF_8), mediaType.toString()).toByteArray(Charsets.UTF_8))
                 }
             }
         }).getOrNull() ?: error("Повреждённый, защищённый или неподдерживаемый EPUB")
