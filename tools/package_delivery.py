@@ -20,6 +20,7 @@ copy(Path('app/src/main/assets/p0-sample.epub'),'JJReader-P0-sample.epub')
 for source,name in [('README.md','README.md'),('docs/P0_REPORT.md','P0_REPORT.md'),('docs/HONOR_CHECKLIST.md','HONOR_CHECKLIST.md'),('docs/THIRD_PARTY.md','THIRD_PARTY.md')]: copy(Path(source),name)
 copy(Path('docs/P0_1_XHTML_REPORT.md'),'P0_1_XHTML_REPORT.md')
 copy(Path('docs/P0_2_RUNTIME_REPORT.md'),'P0_2_RUNTIME_REPORT.md')
+copy(Path('docs/P0_3_LAYOUT_TTS_REPORT.md'),'P0_3_LAYOUT_TTS_REPORT.md')
 shutil.copytree(root/'docs',out/'docs',dirs_exist_ok=True)
 shutil.copytree(root/'app/src/main/assets/licenses',out/'licenses',dirs_exist_ok=True)
 checks=out/'checks';checks.mkdir(exist_ok=True)
@@ -43,7 +44,7 @@ with zipfile.ZipFile(out/f'JJReader-{version}-sources.zip','w',zipfile.ZIP_DEFLA
    z.write(root/relative,Path('JJReader')/relative)
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 artifacts={p.name:{'bytes':p.stat().st_size,'sha256':sha(p)} for p in out.iterdir() if p.is_file() and p.name not in ['DELIVERY.json','SHA256SUMS.txt']}
-value={'versionName':version,'versionCode':version_code,'applicationId':metadata['applicationId'],'branch':branch,'commit':commit,'draft_pr':a.pr_url,'android_runtime':'NOT_RUN','honor_current_build':'NOT_RUN','honor_0.1.1_user_results':{'epub_open_scroll_transitions':'PASS','progress':'PASS by observation, end 100%','copy_independence_cancel':'PASS','position_home_lock_return':'PASS','position_recreate_rotate':'FAIL','font_notes':'FAIL','tts_highlight':'FAIL','both_voices_pause_resume':'INITIAL_SUCCESS','tts_repeat':'UNSTABLE, silence or NETWORK','audio_stop_home_lock':'NOT_SEPARATELY_CONFIRMED'},'edge_cloud':'BLOCKED/NOT_RUN; previous proxy CONNECT 403, mock WebSocket is not Microsoft','unit_tests':tests,'artifacts':artifacts}
+value={'versionName':version,'versionCode':version_code,'applicationId':metadata['applicationId'],'branch':branch,'commit':commit,'draft_pr':a.pr_url,'android_runtime':'NOT_RUN','honor_current_build':'NOT_RUN','honor_0.1.1_user_results':{'epub_open_scroll_transitions':'PASS','progress':'PASS by observation, end 100%','copy_independence_cancel':'PASS','position_home_lock_return':'PASS','position_recreate_rotate':'FAIL','font_notes':'FAIL','tts_highlight':'FAIL','both_voices_pause_resume':'INITIAL_SUCCESS','tts_repeat':'UNSTABLE, silence or NETWORK','audio_stop_home_lock':'NOT_SEPARATELY_CONFIRMED'},'honor_0.1.2_user_results':{'font_notes':'PASS','approximate_restore_recreate_rotate':'PASS, accuracy accepted','svetlana_highlight':'PASS','home_lock_stop_manual_resume':'PASS','dmitry':'two network syntheses completed, HTTP101 close1000; third IO_SocketException, cause unknown'},'edge_cloud':'NOT_RUN; local mock WebSocket is not Microsoft','unit_tests':tests,'artifacts':artifacts}
 (out/'DELIVERY.json').write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
 (out/'SHA256SUMS.txt').write_text(''.join(f'{data["sha256"]}  {name}\n' for name,data in artifacts.items()))
 print(json.dumps({'commit':commit,'files':len(artifacts),'apk':artifacts[apk_name]},indent=2))

@@ -49,11 +49,11 @@ class SpeechQueue(private val scope: CoroutineScope,
                 highlight(null)
                 supervisorScope {
                     fun prefetch(index: Int): Deferred<Result<Pair<File, SpeechDiagnostics.Attempt>>> = async(io) {
-                        val attempt = diagnostics.attempt(runVoice)
-                        try { Result.success(fetch(items[index], runVoice, attempt) to attempt) }
-                        catch (e: CancellationException) { attempt.record("cancelled", code = "CANCELLED"); throw e }
+                        val attempt = diagnostics.attempt(runVoice, block = index + 1)
+                        try { Result.success(fetch(items[index], runVoice, attempt) to attempt.latest) }
+                        catch (e: CancellationException) { attempt.latest.record("cancelled", code = "CANCELLED"); throw e }
                         catch (e: Exception) {
-                            attempt.record(if (e is EdgeFailure) e.stage else "receive", error = e, code = if (e is EdgeFailure) e.code else "FETCH")
+                            attempt.latest.record(if (e is EdgeFailure) e.stage else "receive", error = e, code = if (e is EdgeFailure) e.code else "FETCH")
                             Result.failure(e)
                         }
                     }
@@ -67,7 +67,7 @@ class SpeechQueue(private val scope: CoroutineScope,
                         ensureActive(); check(run == generation)
                         play(file, attempt) {
                             ensureActive(); if (run != generation) throw CancellationException()
-                            highlight(items[cursor]); state = State.PLAYING; attempt.record("playback")
+                            highlight(items[cursor]); state = State.PLAYING; attempt.record("playbackReady")
                         }
                         ensureActive()
                         attempt.record("completed")

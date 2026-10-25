@@ -19,7 +19,9 @@ class PhrasePlayer(context: Context, private val scope: CoroutineScope,
     private val diagnostics = SpeechDiagnostics { json ->
         try { synchronized(diagnosticFile.absolutePath.intern()) { BookStore.writeAtomic(diagnosticFile, org.json.JSONObject(json)) } } catch (_: Exception) { }
     }
-    private val cache = PhraseAudioCache(directory) { text, voice, attempt -> edge.synthesize(text, voice, attempt) }
+    private val cache = PhraseAudioCache(directory, onRetry = { number ->
+        withContext(Dispatchers.Main) { ensureActive(); status("Повтор подключения $number/3") }
+    }) { text, voice, attempt -> edge.synthesize(text, voice, attempt) }
     private val manager = context.getSystemService(AudioManager::class.java)
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attributes)
@@ -53,7 +55,7 @@ class PhrasePlayer(context: Context, private val scope: CoroutineScope,
                             try {
                                 if (!continuation.isActive) return@launch
                                 onStarted()
-                                if (continuation.isActive && media === player) player.start()
+                                if (continuation.isActive && media === player) { player.start(); attempt.record("playback") }
                             } catch (e: Exception) { if (continuation.isActive) continuation.resumeWithException(e) }
                         }
                     }

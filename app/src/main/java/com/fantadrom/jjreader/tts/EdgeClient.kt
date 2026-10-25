@@ -20,7 +20,7 @@ import kotlin.coroutines.resumeWithException
 enum class Voice(val wire: String, val label: String) {
     DMITRY("ru-RU-DmitryNeural", "Дмитрий"), SVETLANA("ru-RU-SvetlanaNeural", "Светлана")
 }
-class EdgeFailure(val code: String, val stage: String = "receive", cause: Throwable? = null) : Exception(code, cause)
+class EdgeFailure(val code: String, val stage: String = "receive", cause: Throwable? = null, val retryAfterMs: Long? = null) : Exception(code, cause)
 
 /** The endpoint, protocol token and synthesis parameters are unchanged from the voices heard on Honor. */
 class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1",
@@ -59,16 +59,16 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                         }
                     }).build()
                     val socket = requestClient.newWebSocket(request, object : WebSocketListener() {
-                        private fun fail(code: String, ws: WebSocket, error: Throwable? = null, http: Int? = null, close: Int? = null) {
+                        private fun fail(code: String, ws: WebSocket, error: Throwable? = null, http: Int? = null, close: Int? = null, retryAfter: Long? = null) {
                             if (!done.compareAndSet(false, true)) return
                             val stage = attempt?.stage ?: "receive"
                             attempt?.record(stage, http = http, close = close, error = error, code = code)
-                            continuation.resumeWithException(EdgeFailure(code, stage, error))
+                            continuation.resumeWithException(EdgeFailure(code, stage, error, retryAfter))
                             ws.cancel()
                         }
                         override fun onOpen(webSocket: WebSocket, response: Response) {
                             if (done.get()) { webSocket.cancel(); return }
-                            attempt?.record("receive", http = response.code)
+                            attempt?.record("opened", http = response.code)
                             val timestamp = DateTimeFormatter.ofPattern("EEE MMM dd yyyy HH:mm:ss 'GMT+0000 (Coordinated Universal Time)'", Locale.US).withZone(ZoneOffset.UTC).format(Instant.now())
                             val configSent = webSocket.send("X-Timestamp:$timestamp\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n" +
                                 "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}\r\n")
@@ -86,7 +86,11 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                             val header = bytesMessage.substring(2, 2 + length).utf8()
                             if (header.lineSequence().any { it.trim() == "Path:audio" }) {
                                 if (bytes.size() + bytesMessage.size > 2 * 1024 * 1024) return fail("AUDIO_TOO_LARGE", webSocket)
-                                bytes.write(bytesMessage.substring(2 + length).toByteArray())
+                                val chunk = bytesMessage.substring(2 + length).toByteArray()
+                                if (chunk.isNotEmpty()) {
+                                    if (bytes.size() == 0) attempt?.record("firstAudio")
+                                    bytes.write(chunk); attempt?.audio(chunk.size)
+                                }
                             }
                         }
                         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -95,13 +99,14 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                                 val audio = bytes.toByteArray()
                                 if (audio.size < 100) return fail("NO_AUDIO", webSocket)
                                 if (done.compareAndSet(false, true)) {
-                                    attempt?.record("decode")
+                                    attempt?.record("synthesized")
                                     continuation.resume(audio)
                                     webSocket.close(1000, null)
                                 }
                             }
                         }
                         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                            if (done.get()) return
                             when {
                                 response != null -> attempt?.record("handshake", http = response.code)
                                 t is UnknownHostException -> attempt?.record("DNS")
@@ -115,7 +120,12 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                                 t is ConnectException -> "CONNECT"
                                 else -> "IO_${t.javaClass.simpleName}"
                             }
-                            fail(code, webSocket, t, http = response?.code)
+                            val retryAfter = response?.header("Retry-After")?.let { raw ->
+                                raw.toLongOrNull()?.coerceIn(0, 86400)?.times(1000) ?: runCatching {
+                                    (java.time.ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(0)
+                                }.getOrNull()
+                            }
+                            fail(code, webSocket, t, http = response?.code, retryAfter = retryAfter)
                         }
                         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                             if (!done.get()) fail("CLOSED_$code", webSocket, close = code) else webSocket.close(code, null)

@@ -47,6 +47,35 @@ class ReaderRuntimeTest {
     }
     private fun nav(a: ReaderRuntimeActivity) = a.supportFragmentManager.findFragmentByTag("reader") as EpubNavigatorFragment
     private fun state(a: ReaderRuntimeActivity) = NoteStore(a, checkNotNull(BookStore(a).current()).id).data
+    @Test fun portraitLandscapePortraitMeasuresNativeWebViewAndTextWidths() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click()); ready(scenario)
+            suspend fun orient(value: Int): JSONObject {
+                scenario.onActivity { it.requestedOrientation = value }
+                delay(1200)
+                val a = ready(scenario)
+                return withContext(Dispatchers.Main) {
+                    fun find(v: android.view.View): android.webkit.WebView? {
+                        if (v is android.webkit.WebView) return v
+                        if (v is android.view.ViewGroup) for (i in 0 until v.childCount) find(v.getChildAt(i))?.let { return it }
+                        return null
+                    }
+                    val web = checkNotNull(find(checkNotNull(nav(a).view)))
+                    val geometry = LocatorBridge(a).call(nav(a), "({innerWidth,root:document.documentElement.getBoundingClientRect().width,body:document.body.getBoundingClientRect().width,text:document.querySelector('p').getBoundingClientRect().width,maxWidth:getComputedStyle(document.body).maxWidth,padding:getComputedStyle(document.body).paddingLeft,columns:getComputedStyle(document.documentElement).columnCount})")!!
+                    geometry.put("webViewPx", web.width).put("containerPx", (web.parent as android.view.View).width)
+                    assertEquals(web.width.toDouble(), geometry.getDouble("innerWidth") * a.resources.displayMetrics.density, 4.0)
+                    assertEquals(geometry.getDouble("innerWidth") - 32, geometry.getDouble("text"), 4.0)
+                    android.util.Log.i("JJReaderLayout", geometry.toString())
+                    geometry
+                }
+            }
+            val portrait = orient(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+            val landscape = orient(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+            val back = orient(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+            assertTrue(landscape.getDouble("text") > portrait.getDouble("text") + 100)
+            assertEquals(portrait.getDouble("text"), back.getDouble("text"), 4.0)
+        }
+    }
     @Test fun actualUiFontActionModeNotesRecreationAndVisibleUnderline() = runBlocking {
         launch(UUID.randomUUID().toString()).use { scenario ->
             onView(withText("Пример P0")).perform(click()); var a = ready(scenario)

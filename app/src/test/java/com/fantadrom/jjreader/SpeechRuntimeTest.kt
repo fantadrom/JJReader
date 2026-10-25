@@ -65,7 +65,7 @@ class SpeechRuntimeTest {
             networkFails = true
             try { cache.get(items[1], Voice.DMITRY, diagnostics.attempt(Voice.DMITRY)); fail("Expected network error") } catch (_: EdgeFailure) { }
             assertFalse(dir.listFiles()!!.any { it.name.endsWith(".tmp") })
-            networkFails = false; cache.get(items[1], Voice.DMITRY, diagnostics.attempt(Voice.DMITRY)); assertEquals(4, requests)
+            networkFails = false; cache.get(items[1], Voice.DMITRY, diagnostics.attempt(Voice.DMITRY)); assertEquals(6, requests)
         } finally { dir.deleteRecursively() }
     }
     @Test fun diagnosticAllowListRetainsCategoryAndNeverLeaksExceptionContent() {
