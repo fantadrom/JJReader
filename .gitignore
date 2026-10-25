@@ -1,0 +1,43 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Build outputs for all modules
+**/build/
+
+# Android application packages
+*.apk
+*.aab
+
+# IDE temporary files
+.idea/caches/
+
+# Local Android Studio device settings
+/.idea/deploymentTargetSelector.xml
+/.idea/deviceManager.xml
+# Local IDE configuration
+/.idea/runConfigurations.xml
+/.idea/vcs.xml
+
+# Signing keys
+*.jks
+*.keystore
+# Task-local tools, downloads and verification logs
+/work/
+/.kotlin/
+
+# Python verification caches
+__pycache__/
+*.py[cod]
