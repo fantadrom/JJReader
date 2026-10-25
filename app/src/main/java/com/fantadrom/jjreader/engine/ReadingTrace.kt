@@ -1,0 +1,51 @@
+package com.fantadrom.jjreader.engine
+
+import com.fantadrom.jjreader.books.BookStore
+import com.fantadrom.jjreader.text.TextModel
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.UUID
+
+/** Bounded local trace, shared across Activity/process recreation. No free-form strings or payloads. */
+class ReadingTrace(private val file: File) {
+    enum class Event { CREATE, PAUSE, DESTROY, STORE_LOAD, STORE_WRITE, INITIAL, READY, FREEZE, GO, DOM, RESTORE_REQUEST, ACK, COMMIT, CAPTURE, REJECT, NATIVE, DIALOG }
+    enum class Source { LIFECYCLE, INITIAL, NOTE, CAPTURE, RESTORE, FONT, IME, NATIVE, NOTES, ACTIVITY, SESSION, DIAGNOSTIC }
+    enum class Reason { STALE, CANCELLED, NOT_READY, NO_ANCHOR, NULL_RESULT, RESOURCE_MISMATCH, DOM_MISMATCH, WRITE_READ_MISMATCH, ERROR, OPEN, CLOSE }
+    fun begin() = synchronized(file.absolutePath.intern()) { runCatching { BookStore.writeAtomic(file, empty()) }; Unit }
+    private fun empty() = JSONObject().put("schema",1).put("clientConfiguration","jj-p0.5-r1").put("sessionId",UUID.randomUUID().toString()).put("events",JSONArray())
+    private fun read() = runCatching { BookStore.readAtomic(file) }.getOrElse { empty() }
+    fun json(): JSONObject = synchronized(file.absolutePath.intern()) {
+        read().also { root -> val rows=root.getJSONArray("events"); repeat(rows.length()){rows.getJSONObject(it).remove("signature")} }
+    }
+    fun record(event: Event, source: Source, activity: String, session: String? = null, book: String? = null,
+               revision: Long? = null, target: Int? = null, observed: Int? = null, dom: Int? = null,
+               document: String? = null, start: Int? = null, end: Int? = null, ready: Boolean? = null,
+               accepted: Boolean? = null, diskChapter: Int? = null, diskStart: Int? = null,
+               locatorChapter: Int? = null, store: String? = null, reason: Reason? = null, operation: Long? = revision, diskBook: String? = null) {
+        synchronized(file.absolutePath.intern()) {
+            runCatching {
+                val root=read();val events=root.getJSONArray("events")
+                val row=JSONObject().put("event",event.name).put("source",source.name).put("activity",activity)
+                // Book/document IDs are hashed here, never accept a URL/title/quote as an exported field.
+                session?.let{row.put("readerSession",it)};book?.let{row.put("book",TextModel.hash(it.toByteArray()).take(16))}
+                diskBook?.let{row.put("diskBook",TextModel.hash(it.toByteArray()).take(16))}
+                document?.let{row.put("document",TextModel.hash(it.toByteArray()).take(16))};store?.let{row.put("store",it)}
+                revision?.let{row.put("revision",it)};operation?.let{row.put("operation",it)};target?.let{row.put("target",it)};observed?.let{row.put("observed",it)}
+                dom?.let{row.put("dom",it)};start?.let{row.put("start",it)};end?.let{row.put("end",it)}
+                ready?.let{row.put("ready",it)};accepted?.let{row.put("accepted",it)};diskChapter?.let{row.put("diskChapter",it)}
+                diskStart?.let{row.put("diskStart",it)};locatorChapter?.let{row.put("locatorChapter",it)};reason?.let{row.put("reason",it.name)}
+                // Suppress identical periodic observations; preserve operation/lifecycle edges.
+                val signature=row.toString()
+                if(event in setOf(Event.DOM,Event.CAPTURE,Event.COMMIT,Event.STORE_WRITE,Event.REJECT,Event.NATIVE)) {
+                    val previous=(events.length()-1 downTo 0).asSequence().map{events.getJSONObject(it)}
+                        .firstOrNull{it.optString("event")==event.name}
+                    if(previous?.optString("signature")==signature)return@runCatching
+                }
+                row.put("signature",signature).put("timeMs",System.currentTimeMillis())
+                events.put(row);while(events.length()>256)events.remove(0)
+                BookStore.writeAtomic(file,root)
+            }
+        }
+    }
+}

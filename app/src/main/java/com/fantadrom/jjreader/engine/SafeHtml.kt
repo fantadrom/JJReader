@@ -32,7 +32,12 @@ object SafeHtml {
             // CSP host grammar rejects Readium's underscore virtual hosts. Restrict trusted
             // engine code/styles by HTTPS path; publication networking is independently denied
             // by ReadiumEngine's offline HttpClient and local-resource WebView interceptor.
-            "default-src 'none'; script-src https://*/readium/scripts/readium-reflowable.js; style-src 'unsafe-inline' 'self' https://*/readium/readium-css/; img-src 'self' data:; font-src 'self' data: https://*/readium/fonts/; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
+            "default-src 'none'; script-src https://*/readium/scripts/readium-reflowable.js; style-src 'unsafe-inline' 'self' https://*/readium/readium-css/; img-src 'self' data:; font-src 'self' data: https://*/readium/fonts/ https://*/readium/readium-css/fonts/; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
+        // Rendition-level CSS is present before every document loads, including prefetched pages.
+        // Higher specificity than Readium's scroll body rule, independent of JS/capture readiness.
+        doc.select("style#jj-reader-width").remove()
+        doc.head().appendElement("style").attr("id", "jj-reader-width").text(
+            "html:root[style*=readium-scroll-on] body{max-width:none!important;padding-left:16px!important;padding-right:16px!important}")
         doc.outputSettings().prettyPrint(false).charset(Charsets.UTF_8)
             .syntax(if (xhtml) Document.OutputSettings.Syntax.xml else Document.OutputSettings.Syntax.html)
             .escapeMode(if (xhtml) Entities.EscapeMode.xhtml else Entities.EscapeMode.base)

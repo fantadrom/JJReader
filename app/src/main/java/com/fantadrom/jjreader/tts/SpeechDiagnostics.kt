@@ -61,7 +61,7 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
         }
         publish()
     }
-    @Synchronized fun text(): String = JSONObject().put("schema", 3).put("purpose", purpose).put("sessionId", sessionId).put("generation", generation)
+    @Synchronized fun text(): String = JSONObject().put("schema", 4).put("purpose", purpose).put("sessionId", sessionId).put("generation", generation)
         .put("attempts", JSONArray(attempts.values.toList())).toString(2)
     private fun publish() { persist(text()) }
     @Synchronized fun close() { closed = true }
@@ -90,6 +90,16 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
                                        private val voice: Voice, private val block: Int, val number: Int, private val run: Long, private val session: String) {
         var latest: Attempt = this; private set
         fun retry(number: Int): Attempt = owner.retry(voice, block, number, run, session).also { latest = it }
+        fun configuration(route: String) {
+            owner.protocol(id,"route",route);owner.protocol(id,"ssmlProfile","full-ru-default-v1")
+            owner.protocol(id,"clientConfiguration","jj-p0.5-r1")
+        }
+        internal fun response(response: EdgeProtocol.ResponseSummary) {
+            owner.protocol(id,"responseFormat",response.format)
+            owner.protocol(id,"responseStatus",response.status)
+            owner.protocol(id,"responseHasStatus",response.hasStatus)
+            owner.protocol(id,"responseHasError",response.hasError)
+        }
         fun wireName() = owner.protocol(id, "wireNameKind", "full")
         fun sent(config: Boolean, ssml: Boolean) {
             owner.protocol(id, "configSendAccepted", config); owner.protocol(id, "ssmlSendAccepted", ssml)

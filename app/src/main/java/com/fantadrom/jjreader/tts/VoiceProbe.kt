@@ -9,16 +9,21 @@ import java.io.File
 internal class VoiceProbe(private val diagnostics: SpeechDiagnostics,
                           private val fetch: suspend (String, Voice, SpeechDiagnostics.Attempt) -> File,
                           private val play: suspend (File, SpeechDiagnostics.Attempt) -> Unit,
-                          private val status: (String) -> Unit) {
-    suspend fun run(generation: Long) {
-        diagnostics.beginRun(generation, "voiceCheck")
-        for ((index, voice) in Voice.entries.withIndex()) {
+                          private val status: (String) -> Unit,
+                          private val fetchAlternative: (suspend (String, Voice, SpeechDiagnostics.Attempt) -> File)? = null) {
+    suspend fun run(generation: Long, compareRoutes: Boolean = false) {
+        diagnostics.beginRun(generation, if(compareRoutes)"routeComparison"else"voiceCheck")
+        if(compareRoutes)requireNotNull(fetchAlternative)
+        val requests=(if(compareRoutes)EdgeRoute.entries else listOf(EdgeRoute.CURRENT)).flatMap{route->Voice.entries.map{route to it}}
+        for ((index, pair) in requests.withIndex()) {
+            val (route,voice)=pair
             currentCoroutineContext().ensureActive()
             val attempt = diagnostics.attempt(voice, "network", block = index + 1, maxAttempts = 1)
             var file: File? = null
             try {
-                status("Проверка голоса: ${voice.label}")
-                file = fetch(TEXT, voice, attempt)
+                attempt.configuration(route.id)
+                status("Проверка: ${route.id}, ${voice.label}")
+                file = (if(route==EdgeRoute.CURRENT)fetch else checkNotNull(fetchAlternative))(TEXT, voice, attempt)
                 currentCoroutineContext().ensureActive()
                 play(file, attempt)
                 currentCoroutineContext().ensureActive()

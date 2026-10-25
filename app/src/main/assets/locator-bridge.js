@@ -2,12 +2,6 @@
 // This runs only in the current sanitized Readium resource; it exposes no Java interface.
 (function () {
   if (window.JJ) return;
-  // Readium 3.4 scroll CSS caps body at 40rem even with ColumnCount.ONE.
-  // Override only that cap and horizontal gutter; keep native scroll/font/decoration CSS.
-  const layout = document.createElementNS('http://www.w3.org/1999/xhtml', 'style');
-  layout.id = 'jj-reader-width';
-  layout.textContent = ':root[style*=readium-scroll-on] body{max-width:none!important;padding-left:16px!important;padding-right:16px!important}';
-  document.head.appendChild(layout);
   const blocks = new Set('p div section article h1 h2 h3 h4 h5 h6 li blockquote tr td figcaption pre br'.split(' '));
   const excluded = new Set('script style nav noscript iframe object svg math template'.split(' '));
   const chars = [], points = [];

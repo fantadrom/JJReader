@@ -28,6 +28,8 @@ import java.util.UUID
 
 /** P0 laboratory. The original Compose theme is retained for the next stage. */
 open class MainActivity : AppCompatActivity() {
+    private lateinit var readingTrace: ReadingTrace
+    private val activityId = UUID.randomUUID().toString()
     private lateinit var store: BookStore
     private lateinit var engine: ReadiumEngine
     private lateinit var bridge: LocatorBridge
@@ -61,6 +63,8 @@ open class MainActivity : AppCompatActivity() {
         // A Readium Fragment needs its Publication before restoration. Rebuild from the durable
         // locator rather than asking FragmentManager to restore an unbound navigator.
         super.onCreate(null)
+        readingTrace = ReadingTrace(java.io.File(filesDir,"reading-last-session.json"))
+        readingTrace.record(ReadingTrace.Event.CREATE,ReadingTrace.Source.LIFECYCLE,activityId)
         store = BookStore(this); engine = ReadiumEngine(this); bridge = LocatorBridge(this)
         buildUi()
         player = PhrasePlayer(this, lifecycleScope, { highlightPhrase(it) }, { status.text = it })
@@ -97,24 +101,39 @@ open class MainActivity : AppCompatActivity() {
         root.addView(row(button("Диагностика TTS") { showTtsDiagnostics() }))
         setContentView(root)
     }
+    internal fun readingTraceForTests() = readingTrace.json()
+    private fun combinedDiagnostics(): String = JSONObject().put("reader",readingTrace.json())
+        .put("tts",runCatching{JSONObject(player.diagnosticText())}.getOrElse{JSONObject().put("available",false)}).toString(2)
+    private fun showDiagnosticActions() {
+        AlertDialog.Builder(this).setTitle("Проверки P0").setItems(arrayOf("Сравнить маршруты: 4 сетевых запроса", "Начать новую трассу чтения")) { _, which ->
+            if(which==0) AlertDialog.Builder(this).setTitle("Сравнение голосов/маршрутов")
+                .setMessage("4 запроса Microsoft: два голоса × два маршрута, последовательно, без кеша, prefetch и повторов. Только фраза «${VoiceProbe.TEXT}». Обычный маршрут не меняется. После проверки откройте диагностику и скопируйте общий результат.")
+                .setPositiveButton("Запустить"){_,_->player.checkVoices(compareRoutes=true)}.setNegativeButton("Отмена",null).show()
+            else { readingTrace.begin(); readingTrace.record(ReadingTrace.Event.CREATE,ReadingTrace.Source.DIAGNOSTIC,activityId); session?.traceState(ReadingTrace.Event.INITIAL,ReadingTrace.Source.DIAGNOSTIC); status.text="Трасса начата. После сценария скопируйте диагностику." }
+        }.setNegativeButton("Закрыть",null).show()
+    }
+    private fun traceDialog(source:ReadingTrace.Source,reason:ReadingTrace.Reason) {
+        readingTrace.record(ReadingTrace.Event.DIALOG,source,activityId,session?.id,book?.id,observed=session?.chapterIndex(),ready=session?.ready,reason=reason)
+    }
     private fun showTtsDiagnostics() {
+        traceDialog(ReadingTrace.Source.DIAGNOSTIC,ReadingTrace.Reason.OPEN)
         val dialog = AlertDialog.Builder(this).setTitle("Диагностика Edge TTS")
-            .setMessage(player.diagnosticText())
+            .setMessage(combinedDiagnostics())
             .setPositiveButton("Копировать") { _, _ ->
                 getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(
-                    android.content.ClipData.newPlainText("JJReader TTS", player.diagnosticText()))
-            }.setNeutralButton("Проверить голоса", null).setNegativeButton("Закрыть", null).create()
+                    android.content.ClipData.newPlainText("JJReader P0", combinedDiagnostics()))
+            }.setNeutralButton("Проверки", null).setNegativeButton("Закрыть", null).create()
         var update: Job? = null
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { player.checkVoices() }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { showDiagnosticActions() }
             update = lifecycleScope.launch {
                 while (dialog.isShowing) {
-                    dialog.setMessage("Проверка отправляет Microsoft только фиксированную фразу «${VoiceProbe.TEXT}» для обоих голосов, последовательно, без кеша.\n\n" + player.diagnosticText())
+                    dialog.setMessage(combinedDiagnostics())
                     delay(300)
                 }
             }
         }
-        dialog.setOnDismissListener { update?.cancel() }
+        dialog.setOnDismissListener { update?.cancel(); traceDialog(ReadingTrace.Source.DIAGNOSTIC,ReadingTrace.Reason.CLOSE) }
         dialog.show()
     }
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -141,6 +160,17 @@ open class MainActivity : AppCompatActivity() {
     }
     private suspend fun load(value: Book) {
         val newNotes = withContext(Dispatchers.IO) { NoteStore(this@MainActivity, value.id) }
+        fun indexOf(href:String?) = value.chapters.indexOfFirst { it.href.substringBefore('#') == href?.substringBefore('#') }
+        fun storeEvent(event:ReadingTrace.Event,source:ReadingTrace.Source,data:JSONObject,disk:JSONObject?) {
+            val pos=data.optJSONObject("positionV2");val read=disk?.optJSONObject("positionV2")
+            readingTrace.record(event,source,activityId,session?.takeIf{it.book.id==value.id}?.id,value.id,
+                target=pos?.optInt("chapter"),start=pos?.optInt("start"),end=pos?.optInt("end"),
+                diskChapter=read?.optInt("chapter"),diskStart=read?.optInt("start"),
+                locatorChapter=indexOf(disk?.optJSONObject("locator")?.optString("href")),store=newNotes.instanceId,diskBook=read?.optString("bookId"),
+                reason=if(pos?.optInt("chapter")!=read?.optInt("chapter") || pos?.optInt("start")!=read?.optInt("start"))ReadingTrace.Reason.WRITE_READ_MISMATCH else null)
+        }
+        newNotes.onSaved = { source,data,disk -> storeEvent(ReadingTrace.Event.STORE_WRITE,ReadingTrace.Source.valueOf(source.name),data,disk) }
+        storeEvent(ReadingTrace.Event.STORE_LOAD,ReadingTrace.Source.INITIAL,newNotes.data,newNotes.readDisk())
         val pub = withContext(Dispatchers.IO) { engine.open(value.file) }
         session?.freeze()
         navigationJob?.cancelAndJoin(); resizeJob?.cancelAndJoin(); readerJob?.cancelAndJoin(); player.reset()
@@ -156,7 +186,7 @@ open class MainActivity : AppCompatActivity() {
             })
         val nav = supportFragmentManager.fragmentFactory.instantiate(classLoader, EpubNavigatorFragment::class.java.name) as EpubNavigatorFragment
         navigator = nav
-        val reader = ReaderSession(value, newNotes, nav, bridge) { index -> nav.go(pub.readingOrder[index], animated = false) }
+        val reader = ReaderSession(value, newNotes, nav, bridge, goResource = { index -> nav.go(pub.readingOrder[index], animated = false) }, trace=readingTrace, activityId=activityId)
         session = reader
         speechChapter = null
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -187,6 +217,7 @@ open class MainActivity : AppCompatActivity() {
                         if (verifiedHref != locator.href.toString()) { mappingValid = false; verifiedHref = null }
                         // Engine start/progression events are observations, never durable anchors.
                         newNotes.data.put("engineLocator", locator.toJSON())
+                        reader.traceState(ReadingTrace.Event.NATIVE,ReadingTrace.Source.NATIVE)
                         if (speechChapter != null && speechChapter != reader.chapterIndex()) { player.reset(); speechChapter = null }
                     }
                 }
@@ -206,7 +237,7 @@ open class MainActivity : AppCompatActivity() {
         resizeJob?.cancel()
         val reader = session ?: return
         val anchor = data.optJSONObject("positionV2")?.let { JSONObject(it.toString()) }
-        val operation = reader.freeze()
+        val operation = reader.freeze(ReadingTrace.Source.FONT)
         val scale = data.getDouble("fontSize")
         // Applying the preference must not depend on a viewport/locator operation succeeding.
         navigator?.submitPreferences(preferences())
@@ -256,10 +287,11 @@ open class MainActivity : AppCompatActivity() {
         override fun onDestroyActionMode(mode: ActionMode) = Unit
     }
     private fun editNote(draft: JSONObject) {
+        traceDialog(ReadingTrace.Source.IME,ReadingTrace.Reason.OPEN)
         player.pause()
         val reader = session
         val returnPosition = notes?.data?.optJSONObject("positionV2")?.let { JSONObject(it.toString()) }
-        val operation = reader?.freeze() // IME resizing must never replace the durable reading position.
+        val operation = reader?.freeze(ReadingTrace.Source.IME) // IME resizing must never replace the durable reading position.
         val field = EditText(this).apply { hint = "Короткий комментарий"; setText(draft.optString("comment")); minLines = 2; setSelection(text.length) }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0)
@@ -282,6 +314,7 @@ open class MainActivity : AppCompatActivity() {
             field.post { getSystemService(InputMethodManager::class.java).showSoftInput(field, InputMethodManager.SHOW_IMPLICIT) }
         }
         dialog.setOnDismissListener {
+            traceDialog(ReadingTrace.Source.IME,ReadingTrace.Reason.CLOSE)
             editor = null
             getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(field.windowToken, 0)
             lifecycleScope.launch {
@@ -309,16 +342,23 @@ open class MainActivity : AppCompatActivity() {
     }
     private fun showNotes() {
         player.pause()
+        traceDialog(ReadingTrace.Source.NOTE,ReadingTrace.Reason.OPEN)
         val list = notes?.notes?.sortedWith(compareBy({ it.getInt("chapter") }, { it.getInt("start") }, { it.getString("id") })) ?: emptyList()
         if (list.isEmpty()) { status.text = "Выделите текст долгим нажатием → Пометка."; return }
-        AlertDialog.Builder(this).setTitle("Пробные пометки").setItems(list.map { it.getString("quote").take(70) + " — " + it.getString("comment") }.toTypedArray()) { _, which ->
+        val listDialog = AlertDialog.Builder(this).setTitle("Пробные пометки").setItems(list.map { it.getString("quote").take(70) + " — " + it.getString("comment") }.toTypedArray()) { _, which ->
             val reader = session ?: return@setItems
             val note = JSONObject(list[which].toString())
             navigationJob?.cancel(); resizeJob?.cancel()
             navigationJob = lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                try { reader.navigateTo(note) } catch (e: Exception) { handle(e) }
+                try { reader.navigateTo(note) } catch (e: Exception) {
+                    readingTrace.record(ReadingTrace.Event.REJECT,ReadingTrace.Source.NOTE,activityId,reader.id,reader.book.id,
+                        target=note.optInt("chapter"),observed=reader.chapterIndex(),ready=reader.ready,
+                        reason=if(e is CancellationException)ReadingTrace.Reason.CANCELLED else ReadingTrace.Reason.ERROR)
+                    handle(e)
+                }
             }
         }.setNegativeButton("Закрыть", null).show()
+        listDialog.setOnDismissListener { traceDialog(ReadingTrace.Source.NOTE,ReadingTrace.Reason.CLOSE) }
     }
     private fun requestSpeech() {
         if (navigator == null) return
@@ -353,7 +393,7 @@ open class MainActivity : AppCompatActivity() {
         nav.applyDecorations(listOf(Decoration("tts", locator, Decoration.Style.Underline(ReaderDecorations.BLUE))), "tts")
         bridge.call(nav, "({ok:JJ.go(${phrase.start},${phrase.end})})")
     }
-    private fun persist() { try { notes?.save() } catch (e: Exception) { handle(e) } }
+    private fun persist() { try { notes?.save(NoteStore.Source.ACTIVITY) } catch (e: Exception) { handle(e) } }
     private fun handle(e: Exception) {
         if (e is StaleReaderOperation) return
         if (e is CancellationException) throw e
@@ -361,6 +401,8 @@ open class MainActivity : AppCompatActivity() {
     }
     override fun onResume() { super.onResume(); if (navigator != null) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     override fun onPause() {
+        readingTrace.record(ReadingTrace.Event.PAUSE,ReadingTrace.Source.LIFECYCLE,activityId)
+        session?.traceState(ReadingTrace.Event.PAUSE,ReadingTrace.Source.LIFECYCLE)
         player.pause()
         navigationJob?.cancel()
         resizeJob?.cancel()
@@ -369,6 +411,6 @@ open class MainActivity : AppCompatActivity() {
         }
         persist(); window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause()
     }
-    override fun onDestroy() { session?.freeze(); editor?.dismiss(); resizeJob?.cancel(); readerJob?.cancel(); player.close(); super.onDestroy(); publication?.close() }
+    override fun onDestroy() { readingTrace.record(ReadingTrace.Event.DESTROY,ReadingTrace.Source.LIFECYCLE,activityId); session?.traceState(ReadingTrace.Event.DESTROY,ReadingTrace.Source.LIFECYCLE); session?.freeze(); editor?.dismiss(); resizeJob?.cancel(); readerJob?.cancel(); player.close(); super.onDestroy(); publication?.close() }
     companion object { private const val READER_ID = 23001 }
 }

@@ -14,6 +14,7 @@ import kotlin.coroutines.resumeWithException
 class PhrasePlayer(context: Context, private val scope: CoroutineScope,
                    onPhrase: suspend (Phrase?) -> Unit, private val status: (String) -> Unit) {
     private val edge = EdgeClient()
+    private val alternativeEdge = EdgeClient(route=EdgeRoute.READEST)
     private val directory = File(context.cacheDir, "tts-p0").apply { mkdirs() }
     private val diagnosticFile = File(context.filesDir, "tts-last-attempt.json")
     private val diagnostics = SpeechDiagnostics { json ->
@@ -36,7 +37,7 @@ class PhrasePlayer(context: Context, private val scope: CoroutineScope,
     private var probeGeneration = 0L
     private val canProbe = { (context as? LifecycleOwner)?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true }
     val active get() = queue.active || probeJob?.isActive == true
-    fun checkVoices() {
+    fun checkVoices(compareRoutes: Boolean = false) {
         reset()
         if (!canProbe() || manager.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             status("Проверка доступна в приложении при наличии аудиофокуса"); return
@@ -44,13 +45,16 @@ class PhrasePlayer(context: Context, private val scope: CoroutineScope,
         val run = --probeGeneration
         probeJob = scope.launch {
             try {
-                VoiceProbe(diagnostics, { text, voice, attempt ->
+                suspend fun fetch(client: EdgeClient, text: String, voice: Voice, attempt: SpeechDiagnostics.Attempt): File {
                     val file = File.createTempFile("voice-probe-", ".mp3", directory)
                     try {
-                        withContext(Dispatchers.IO) { val audio = edge.synthesize(text, voice, attempt); ensureActive(); file.writeBytes(audio); ensureActive() }
-                        file
+                        withContext(Dispatchers.IO) { val audio = client.synthesize(text, voice, attempt); ensureActive(); file.writeBytes(audio); ensureActive() }
+                        return file
                     } catch (e: Exception) { file.delete(); throw e }
-                }, { file, attempt -> play(file, attempt) {} }, status).run(run)
+                }
+                VoiceProbe(diagnostics, { text, voice, attempt -> fetch(edge,text,voice,attempt) },
+                    { file, attempt -> play(file, attempt) {} }, status,
+                    { text, voice, attempt -> fetch(alternativeEdge,text,voice,attempt) }).run(run,compareRoutes)
             } finally {
                 if (run == probeGeneration) { media?.release(); media = null; manager.abandonAudioFocusRequest(focus); probeJob = null }
             }
@@ -106,5 +110,5 @@ class PhrasePlayer(context: Context, private val scope: CoroutineScope,
             owned?.let { if (media === it) { media = null; it.release() } }
         }
     }
-    fun close() { cancelProbe(); queue.close(); diagnostics.close(); edge.close() }
+    fun close() { cancelProbe(); queue.close(); diagnostics.close(); edge.close(); alternativeEdge.close() }
 }

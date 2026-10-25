@@ -24,8 +24,9 @@ enum class Voice(val wire: String, val label: String, val wireName: String, val 
 class EdgeFailure(val code: String, val stage: String = "receive", cause: Throwable? = null, val retryAfterMs: Long? = null) : Exception(code, cause)
 
 /** The endpoint, protocol token and synthesis parameters are unchanged from the voices heard on Honor. */
-class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1",
-                 baseClient: OkHttpClient = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS).build()) {
+class EdgeClient(private val endpoint: String? = null,
+                 baseClient: OkHttpClient = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS).build(),
+                 private val route: EdgeRoute = EdgeRoute.CURRENT) {
     private val client = baseClient.newBuilder().eventListenerFactory { call ->
         val attempt = call.request().tag(SpeechDiagnostics.Attempt::class.java)
         object : EventListener() {
@@ -42,7 +43,7 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                 suspendCancellableCoroutine { continuation ->
                     val done = AtomicBoolean(false)
                     val id = UUID.randomUUID().toString().replace("-", "")
-                    val url = "$endpoint?TrustedClientToken=${EdgeToken.CLIENT}&ConnectionId=$id" +
+                    val url = "${endpoint ?: route.endpoint}?${route.tokenParameter}=${EdgeToken.CLIENT}&ConnectionId=$id" +
                         "&Sec-MS-GEC=${EdgeToken.generate(Instant.now().epochSecond)}&Sec-MS-GEC-Version=2-143.0.3650.75"
                     val request = Request.Builder().url(url)
                         .header("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
@@ -50,6 +51,7 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                         .header("Cookie", "muid=${UUID.randomUUID().toString().replace("-", "").uppercase(Locale.ROOT)};")
                         .tag(SpeechDiagnostics.Attempt::class.java, attempt).build()
                     val bytes = ByteArrayOutputStream()
+                    attempt?.configuration(route.id)
                     attempt?.wireName()
                     attempt?.record("connect", source = "network")
                     // OkHttp's WebSocket implementation can disable Call EventListener callbacks.
@@ -103,6 +105,7 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                             val headers = EdgeProtocol.headers(text.substringBefore("\r\n\r\n"))
                             val path = EdgeProtocol.path(headers)
                             attempt?.path(path)
+                            if(path == "response") attempt?.response(EdgeProtocol.response(headers,text.substringAfter("\r\n\r\n", "")))
                             EdgeProtocol.error(headers, text.substringAfter("\r\n\r\n", ""))?.let {
                                 attempt?.protocolError(it); return fail("SERVER_PROTOCOL_ERROR", webSocket)
                             }

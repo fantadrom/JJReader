@@ -22,6 +22,15 @@ internal object EdgeProtocol {
     fun path(headers: Map<String, String>): String = headers["path"].let {
         if (it in setOf("turn.start", "response", "audio", "turn.end", "audio.metadata")) it!! else "other"
     }
+    data class ResponseSummary(val format: String, val status: String, val hasStatus: Boolean, val hasError: Boolean)
+    fun response(headers: Map<String,String>,body: String): ResponseSummary {
+        val json=runCatching{JSONObject(body)}.getOrNull()
+        val synthesis=json?.optJSONObject("context")?.optJSONObject("synthesis")
+        val statuses=listOfNotNull(headers["status"],synthesis?.optString("status")?.takeIf{it.isNotBlank()},json?.optString("status")?.takeIf{it.isNotBlank()})
+        val hasError=error(headers,body)!=null
+        val status=if(hasError)"error" else if(statuses.any{it.lowercase(java.util.Locale.ROOT) in setOf("success","succeeded","200","0","ok")})"success" else if(statuses.isNotEmpty())"other" else "absent"
+        return ResponseSummary(if(json!=null)"json"else if(body.isBlank())"empty"else"other",status,statuses.isNotEmpty(),hasError)
+    }
     fun error(headers: Map<String, String>, body: String): String? {
         val json = runCatching { JSONObject(body) }.getOrNull()
         val error = json?.opt("error")?.takeUnless { it == JSONObject.NULL || it == false || it == "" }

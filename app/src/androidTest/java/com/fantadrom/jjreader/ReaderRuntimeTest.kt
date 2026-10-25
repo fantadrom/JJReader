@@ -136,7 +136,7 @@ class ReaderRuntimeTest {
                 withContext(Dispatchers.Main){
                     assertEquals(index,a.readerSessionForTests()!!.chapterIndex())
                     a.readerSessionForTests()!!.context(index)
-                    assertEquals(index,state(a).getJSONObject("positionV2").getInt("chapter"))
+                    assertEquals(a.readingTraceForTests().toString(),index,state(a).getJSONObject("positionV2").getInt("chapter"))
                 }
             }
             suspend fun jump(index:Int) {
@@ -156,6 +156,60 @@ class ReaderRuntimeTest {
                 jump(1);delay(wait);rotate(1)
                 scenario.recreate();assertChapter(1)
                 assertEquals(2,withContext(Dispatchers.Main){state(a).getJSONArray("notes").length()})
+            }
+        }
+    }
+    @Test fun landscapeSwipeAcrossThreeRealResourcesRetainsWidth() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());ready(scenario)
+            scenario.onActivity{it.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE}
+            delay(1200);ready(scenario)
+            suspend fun checkResource(index:Int) {
+                withTimeout(15000){while(withContext(Dispatchers.Main){activity(scenario).readerSessionForTests()!!.chapterIndex()}!=index)delay(32)}
+                val a=ready(scenario)
+                withContext(Dispatchers.Main){
+                    // Read raw native JS: this assertion must not install the bridge/style itself.
+                    val raw=nav(a).evaluateJavascript("JSON.stringify({url:location.pathname,width:innerWidth,text:document.querySelector('p').getBoundingClientRect().width,styles:document.querySelectorAll('style#jj-reader-width').length,maxWidth:getComputedStyle(document.body).maxWidth})")!!
+                    val decoded=if(raw.startsWith('"'))org.json.JSONTokener(raw).nextValue() as String else raw
+                    val geometry=JSONObject(decoded)
+                    assertTrue(geometry.getString("url").endsWith("c${index+1}.xhtml"))
+                    assertEquals(1,geometry.getInt("styles"));assertEquals("none",geometry.getString("maxWidth"))
+                    assertEquals(geometry.getDouble("width")-32,geometry.getDouble("text"),4.0)
+                }
+            }
+            checkResource(0)
+            for(index in listOf(1,2)){onView(withId(23001)).perform(swipeLeft());checkResource(index)}
+            for(index in listOf(1,0)){onView(withId(23001)).perform(swipeRight());checkResource(index)}
+            onView(withText("А+")).perform(click());checkResource(0)
+            scenario.recreate();checkResource(0)
+        }
+    }
+    @Test fun crossResourceProcessRestartProbe() = runBlocking {
+        val phase=InstrumentationRegistry.getArguments().getString("p05ProcessPhase")
+        assumeTrue("Run paired phases with android_process_restart.ps1 -CrossResource",phase in listOf("prepare","verify"))
+        launch("process-p05").use { scenario ->
+            if(phase=="prepare") {
+                onView(withText("Пример P0")).perform(click());var a=ready(scenario)
+                suspend fun add(paragraph:String,comment:String){
+                    longPressWord(a,paragraph);onView(withText("Пометка")).perform(click())
+                    onView(withHint("Короткий комментарий")).perform(replaceText(comment),closeSoftKeyboard())
+                    onView(withText("Сохранить")).perform(click());a=ready(scenario)
+                }
+                add("p1","restart-x1");onView(withText("Раздел →")).perform(click())
+                withTimeout(12000){while(withContext(Dispatchers.Main){a.readerSessionForTests()!!.chapterIndex()}!=1)delay(32)}
+                withContext(Dispatchers.Main){a.readerSessionForTests()!!.context(1)};add("p2","restart-x2")
+                for(index in listOf(0,1)){
+                    onView(withText("Пометки · 2")).perform(click());onView(withText(containsString(" — restart-x${index+1}"))).perform(click())
+                    withTimeout(12000){while(withContext(Dispatchers.Main){state(a).getJSONObject("positionV2").getInt("chapter")}!=index)delay(16)}
+                }
+                BookStore.writeAtomic(File(a.filesDir,"process-p05-expected.json"),JSONObject().put("pid",Process.myPid()).put("chapter",1))
+            }else{
+                val a=ready(scenario);val saved=BookStore.readAtomic(File(a.filesDir,"process-p05-expected.json"))
+                assertNotEquals(saved.getInt("pid"),Process.myPid())
+                withContext(Dispatchers.Main){
+                    assertEquals(1,NoteStore(a,checkNotNull(BookStore(a).current()).id).data.getJSONObject("positionV2").getInt("chapter"))
+                    assertEquals(1,a.readerSessionForTests()!!.chapterIndex());a.readerSessionForTests()!!.context(1)
+                }
             }
         }
     }

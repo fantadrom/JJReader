@@ -50,12 +50,16 @@ fs.mkdirSync(out,{recursive:true});
    const rect=e=>({width:e.getBoundingClientRect().width,maxWidth:getComputedStyle(e).maxWidth,paddingLeft:getComputedStyle(e).paddingLeft,paddingRight:getComputedStyle(e).paddingRight,columns:getComputedStyle(e).columnCount});
    return {innerWidth,root:rect(document.documentElement),body:rect(document.body),text:rect(document.querySelector('p'))};
   });
+  assert.ok((await geometry()).text.width>390);
+  // Negative control: previous build only applied width when its bridge was evaluated.
+  await page.evaluate(()=>document.getElementById('jj-reader-width').remove());
   const cappedPortrait=await geometry();
   await page.setViewportSize({width:1000,height:400});
   const cappedLandscape=await geometry();
   assert.equal(cappedLandscape.innerWidth,1000);
   assert.ok(cappedLandscape.body.width<700,JSON.stringify(cappedLandscape));
-  await page.evaluate(bridge);
+  await page.reload();await page.waitForFunction(()=>typeof window.readium==='object');
+  assert.equal(await page.evaluate(()=>typeof window.JJ),'undefined');
   const landscape=await geometry();
   assert.ok(landscape.text.width>940,JSON.stringify(landscape));
   assert.ok(landscape.text.width>cappedLandscape.text.width+300);
@@ -67,6 +71,20 @@ fs.mkdirSync(out,{recursive:true});
   await page.setViewportSize({width:430,height:650});
   assert.equal((await geometry()).text.width,portrait.text.width);
   const layout={cappedPortrait,cappedLandscape,portrait,landscape,returnPortrait:await geometry()};
+  const documents=[];
+  await page.setViewportSize({width:1000,height:400});
+  for(const resource of ['c1','c2','c3','c2','c1']) {
+   await page.goto(`https://readium_package/EPUB/${resource}.xhtml`);
+   await page.waitForFunction(()=>typeof window.readium==='object');
+   assert.equal(await page.evaluate(()=>typeof window.JJ),'undefined');
+   assert.equal(await page.locator('style#jj-reader-width').count(),1);
+   assert.ok((await geometry()).text.width>940);
+   await page.evaluate(()=>readium.setCSSProperties({'--USER__fontSize':'145%'}));
+   assert.ok((await geometry()).text.width>940);
+   documents.push({resource,geometry:await geometry(),bridgeAbsent:true});
+  }
+  await page.setViewportSize({width:430,height:650});
+  await page.reload();await ready();
   assert.equal(await page.evaluate(()=>document.getElementsByTagNameNS('*','parsererror').length),0);
   assert.equal(await page.evaluate(()=>Array.from(document.images).every(i=>i.complete && i.naturalWidth>0)),true);
   const before=await page.locator('p').first().evaluate(p=>parseFloat(getComputedStyle(p).fontSize));
@@ -116,7 +134,7 @@ fs.mkdirSync(out,{recursive:true});
   const expectedBlock=errors.splice(previousErrors);
   assert.ok(expectedBlock.some(x=>x.includes('Content Security Policy')));
   assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
-  const result={status:'PASS',environment:'desktop Linux Chromium; Java callbacks stubbed; NOT Android/Honor',layout,font:{before,after},selection:'exact cached DOM range with empty native API',restore:'reload + resized viewport',decoration:{visible:true,styles:style},csp:'Readium loaded; book inline script blocked; no outbound requests',cases:7};
+  const result={status:'PASS',environment:'desktop Linux Chromium; Java callbacks stubbed; NOT Android/Honor',layout,documents,font:{before,after},selection:'exact cached DOM range with empty native API',restore:'reload + resized viewport',decoration:{visible:true,styles:style},csp:'Readium loaded; book inline script blocked; no outbound requests',cases:8};
   fs.writeFileSync(path.join(out,'browser-results.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
  }finally{await browser.close()}
 })().catch(error=>{console.error(error);process.exit(1)});

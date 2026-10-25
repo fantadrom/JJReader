@@ -8,6 +8,9 @@ import java.io.File
 
 /** One versioned, atomic document per internal book ID. No destructive migration. */
 class NoteStore(context: Context, bookId: String) {
+    enum class Source { NOTES, ACTIVITY, SESSION }
+    val instanceId = java.util.UUID.randomUUID().toString()
+    var onSaved: ((Source, JSONObject, JSONObject?) -> Unit)? = null
     private val file = File(context.filesDir, "books-v1/$bookId/reader.json")
     val data = if (file.exists()) BookStore.readAtomic(file).also {
         require(it.getInt("schema") == 1) { "Неизвестная версия пометок" }
@@ -18,6 +21,11 @@ class NoteStore(context: Context, bookId: String) {
         if (!data.has("fontUnits")) data.put("fontUnits", "readium-scale-v1")
     }
     val notes: List<JSONObject> get() = data.getJSONArray("notes").let { a -> (0 until a.length()).map { a.getJSONObject(it) } }
-    fun save() = BookStore.writeAtomic(file, data)
+    fun readDisk(): JSONObject? = runCatching { BookStore.readAtomic(file) }.getOrNull()
+    fun save() = save(Source.NOTES)
+    fun save(source: Source) {
+        BookStore.writeAtomic(file, data)
+        onSaved?.invoke(source, data, readDisk())
+    }
     fun add(note: JSONObject) { data.getJSONArray("notes").put(note); data.remove("draft"); save() }
 }
