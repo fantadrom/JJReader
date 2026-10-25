@@ -13,8 +13,8 @@ android {
         applicationId = "com.fantadrom.jjreader"
         minSdk = 31
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.1.3-p0"
+        versionCode = 5
+        versionName = "0.1.4-p0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

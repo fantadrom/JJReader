@@ -42,6 +42,7 @@ open class MainActivity : AppCompatActivity() {
     private var navigator: EpubNavigatorFragment? = null
     private var readerJob: Job? = null
     private var resizeJob: Job? = null
+    private var navigationJob: Job? = null
     private var busy = false
     private var voice = Voice.DMITRY
     private var verifiedHref: String? = null
@@ -93,14 +94,28 @@ open class MainActivity : AppCompatActivity() {
         root.addView(row(button("5 фраз") { requestSpeech() }, button("Пауза") { player.pause() }, button("Продолжить") { if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) player.resume() }))
         status = TextView(this).apply { textSize = 12f; setPadding(dp(16), dp(3), dp(12), dp(8)); maxLines = 3 }
         root.addView(status)
-        root.addView(row(button("Диагностика TTS") {
-            val report = player.diagnosticText()
-            AlertDialog.Builder(this).setTitle("Диагностика Edge TTS").setMessage(report)
-                .setPositiveButton("Копировать") { _, _ ->
-                    getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("JJReader TTS", report))
-                }.setNegativeButton("Закрыть", null).show()
-        }))
+        root.addView(row(button("Диагностика TTS") { showTtsDiagnostics() }))
         setContentView(root)
+    }
+    private fun showTtsDiagnostics() {
+        val dialog = AlertDialog.Builder(this).setTitle("Диагностика Edge TTS")
+            .setMessage(player.diagnosticText())
+            .setPositiveButton("Копировать") { _, _ ->
+                getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(
+                    android.content.ClipData.newPlainText("JJReader TTS", player.diagnosticText()))
+            }.setNeutralButton("Проверить голоса", null).setNegativeButton("Закрыть", null).create()
+        var update: Job? = null
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { player.checkVoices() }
+            update = lifecycleScope.launch {
+                while (dialog.isShowing) {
+                    dialog.setMessage("Проверка отправляет Microsoft только фиксированную фразу «${VoiceProbe.TEXT}» для обоих голосов, последовательно, без кеша.\n\n" + player.diagnosticText())
+                    delay(300)
+                }
+            }
+        }
+        dialog.setOnDismissListener { update?.cancel() }
+        dialog.show()
     }
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun button(label: String, click: () -> Unit) = Button(this).apply { text = label; textSize = 12f; isAllCaps = false; minWidth = 0; setOnClickListener { click() } }
@@ -128,7 +143,7 @@ open class MainActivity : AppCompatActivity() {
         val newNotes = withContext(Dispatchers.IO) { NoteStore(this@MainActivity, value.id) }
         val pub = withContext(Dispatchers.IO) { engine.open(value.file) }
         session?.freeze()
-        resizeJob?.cancelAndJoin(); readerJob?.cancelAndJoin(); player.reset()
+        navigationJob?.cancelAndJoin(); resizeJob?.cancelAndJoin(); readerJob?.cancelAndJoin(); player.reset()
         navigator?.let { supportFragmentManager.beginTransaction().remove(it).commitNow() }
         publication?.close()
         book = value; notes = newNotes; publication = pub; verifiedHref = null; mappingValid = false
@@ -141,7 +156,7 @@ open class MainActivity : AppCompatActivity() {
             })
         val nav = supportFragmentManager.fragmentFactory.instantiate(classLoader, EpubNavigatorFragment::class.java.name) as EpubNavigatorFragment
         navigator = nav
-        val reader = ReaderSession(value, newNotes, nav, bridge)
+        val reader = ReaderSession(value, newNotes, nav, bridge) { index -> nav.go(pub.readingOrder[index], animated = false) }
         session = reader
         speechChapter = null
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -162,7 +177,7 @@ open class MainActivity : AppCompatActivity() {
             var draftShown = false
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try { if (!reader.ready && editor == null) reader.restoreInitial() }
-                catch (e: Exception) { handle(e); return@repeatOnLifecycle }
+                catch (e: Exception) { if (e !is StaleReaderOperation) { handle(e); return@repeatOnLifecycle } }
                 if (!draftShown) {
                     draftShown = true
                     newNotes.data.optJSONObject("draft")?.let { editNote(it) }
@@ -177,7 +192,7 @@ open class MainActivity : AppCompatActivity() {
                 }
                 launch {
                     while (isActive) {
-                        try { updateViewport(nav) } catch (e: Exception) { if (e is CancellationException) throw e; progress.text = "Процент: DOM ещё не готов" }
+                        try { updateViewport(nav) } catch (e: Exception) { if (e is CancellationException && e !is StaleReaderOperation) throw e; progress.text = "Процент: DOM ещё не готов" }
                         delay(350)
                     }
                 }
@@ -191,15 +206,15 @@ open class MainActivity : AppCompatActivity() {
         resizeJob?.cancel()
         val reader = session ?: return
         val anchor = data.optJSONObject("positionV2")?.let { JSONObject(it.toString()) }
-        reader.freeze()
+        val operation = reader.freeze()
         val scale = data.getDouble("fontSize")
         // Applying the preference must not depend on a viewport/locator operation succeeding.
         navigator?.submitPreferences(preferences())
         status.text = "Размер: ${(scale * 100).toInt()}%"
         resizeJob = lifecycleScope.launch {
             try {
-                reader.awaitFont(scale)
-                if (anchor != null) reader.restore(anchor) else reader.restoreInitial()
+                reader.awaitFont(scale, operation)
+                if (anchor != null) reader.restore(anchor, operation = operation) else reader.restoreInitial()
             } catch (e: Exception) { handle(e) }
         }
     }
@@ -244,7 +259,7 @@ open class MainActivity : AppCompatActivity() {
         player.pause()
         val reader = session
         val returnPosition = notes?.data?.optJSONObject("positionV2")?.let { JSONObject(it.toString()) }
-        reader?.freeze() // IME resizing must never replace the durable reading position.
+        val operation = reader?.freeze() // IME resizing must never replace the durable reading position.
         val field = EditText(this).apply { hint = "Короткий комментарий"; setText(draft.optString("comment")); minLines = 2; setSelection(text.length) }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0)
@@ -274,7 +289,8 @@ open class MainActivity : AppCompatActivity() {
                     try { withTimeout(3000) { while (ViewCompat.getRootWindowInsets(window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true) delay(32) } }
                     catch (_: TimeoutCancellationException) { }
                     if (session === reader && reader != null) {
-                        if (returnPosition != null) reader.restore(returnPosition) else reader.restoreInitial()
+                        reader.requireCurrent(checkNotNull(operation))
+                        if (returnPosition != null) reader.restore(returnPosition, operation = checkNotNull(operation)) else reader.restoreInitial()
                         reader.capture()
                     }
                 } catch (e: Exception) { handle(e) }
@@ -296,18 +312,11 @@ open class MainActivity : AppCompatActivity() {
         val list = notes?.notes?.sortedWith(compareBy({ it.getInt("chapter") }, { it.getInt("start") }, { it.getString("id") })) ?: emptyList()
         if (list.isEmpty()) { status.text = "Выделите текст долгим нажатием → Пометка."; return }
         AlertDialog.Builder(this).setTitle("Пробные пометки").setItems(list.map { it.getString("quote").take(70) + " — " + it.getString("comment") }.toTypedArray()) { _, which ->
-            val note = list[which]
-            lifecycleScope.launch {
-                try {
-                    val nav = navigator ?: return@launch; val chapter = book!!.chapters[note.getInt("chapter")]
-                    check(TextModel.hash(chapter.text.toByteArray()) == note.getString("textHash")) { "Текст не соответствует локатору" }
-                    check(TextModel.slice(chapter.text, note.getInt("start"), note.getInt("end")) == note.getString("quote"))
-                    val reader = session ?: return@launch
-                    reader.freeze()
-                    check(nav.go(publication!!.readingOrder[note.getInt("chapter")], animated = false)) { "Переход к ресурсу не принят" }
-                    reader.restore(note)
-                    reader.capture()
-                } catch (e: Exception) { handle(e) }
+            val reader = session ?: return@setItems
+            val note = JSONObject(list[which].toString())
+            navigationJob?.cancel(); resizeJob?.cancel()
+            navigationJob = lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                try { reader.navigateTo(note) } catch (e: Exception) { handle(e) }
             }
         }.setNegativeButton("Закрыть", null).show()
     }
@@ -346,12 +355,14 @@ open class MainActivity : AppCompatActivity() {
     }
     private fun persist() { try { notes?.save() } catch (e: Exception) { handle(e) } }
     private fun handle(e: Exception) {
+        if (e is StaleReaderOperation) return
         if (e is CancellationException) throw e
         status.text = e.message?.takeIf { !it.contains("<") && it.length < 180 } ?: "Не удалось выполнить действие. Данные книги сохранены."
     }
     override fun onResume() { super.onResume(); if (navigator != null) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     override fun onPause() {
         player.pause()
+        navigationJob?.cancel()
         resizeJob?.cancel()
         lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try { session?.capture() } catch (e: Exception) { if (e is CancellationException) throw e }

@@ -17,8 +17,9 @@ import javax.net.ssl.SSLException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-enum class Voice(val wire: String, val label: String) {
-    DMITRY("ru-RU-DmitryNeural", "Дмитрий"), SVETLANA("ru-RU-SvetlanaNeural", "Светлана")
+enum class Voice(val wire: String, val label: String, val wireName: String, val locale: String = "ru-RU") {
+    DMITRY("ru-RU-DmitryNeural", "Дмитрий", "Microsoft Server Speech Text to Speech Voice (ru-RU, DmitryNeural)"),
+    SVETLANA("ru-RU-SvetlanaNeural", "Светлана", "Microsoft Server Speech Text to Speech Voice (ru-RU, SvetlanaNeural)")
 }
 class EdgeFailure(val code: String, val stage: String = "receive", cause: Throwable? = null, val retryAfterMs: Long? = null) : Exception(code, cause)
 
@@ -49,6 +50,7 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                         .header("Cookie", "muid=${UUID.randomUUID().toString().replace("-", "").uppercase(Locale.ROOT)};")
                         .tag(SpeechDiagnostics.Attempt::class.java, attempt).build()
                     val bytes = ByteArrayOutputStream()
+                    attempt?.wireName()
                     attempt?.record("connect", source = "network")
                     // OkHttp's WebSocket implementation can disable Call EventListener callbacks.
                     // A delegating DNS hook records resolution without changing the resolver.
@@ -72,19 +74,21 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                             val timestamp = DateTimeFormatter.ofPattern("EEE MMM dd yyyy HH:mm:ss 'GMT+0000 (Coordinated Universal Time)'", Locale.US).withZone(ZoneOffset.UTC).format(Instant.now())
                             val configSent = webSocket.send("X-Timestamp:$timestamp\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n" +
                                 "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}\r\n")
-                            val escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
-                                .filter { it >= ' ' || it == '\n' || it == '\t' }
-                            val ssmlSent = webSocket.send("X-RequestId:$id\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}Z\r\nPath:ssml\r\n\r\n" +
-                                "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='ru-RU'><voice name='${voice.wire}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>$escaped</prosody></voice></speak>")
+                            val ssmlSent = webSocket.send("X-RequestId:$id\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}Z\r\nPath:ssml\r\n\r\n" + EdgeProtocol.ssml(text, voice))
+                            attempt?.sent(configSent, ssmlSent)
                             if (!configSent || !ssmlSent) fail("SEND_REJECTED", webSocket)
                         }
                         override fun onMessage(webSocket: WebSocket, bytesMessage: ByteString) {
                             if (done.get()) return
+                            attempt?.message(binary = true)
                             if (bytesMessage.size < 2) return fail("FRAME_SHORT", webSocket)
                             val length = ((bytesMessage[0].toInt() and 255) shl 8) or (bytesMessage[1].toInt() and 255)
                             if (length + 2 > bytesMessage.size) return fail("FRAME_HEADER", webSocket)
-                            val header = bytesMessage.substring(2, 2 + length).utf8()
-                            if (header.lineSequence().any { it.trim() == "Path:audio" }) {
+                            val header = EdgeProtocol.headers(bytesMessage.substring(2, 2 + length).utf8())
+                            val path = EdgeProtocol.path(header)
+                            attempt?.path(path)
+                            EdgeProtocol.error(header, "")?.let { attempt?.protocolError(it); return fail("SERVER_PROTOCOL_ERROR", webSocket) }
+                            if (path == "audio") {
                                 if (bytes.size() + bytesMessage.size > 2 * 1024 * 1024) return fail("AUDIO_TOO_LARGE", webSocket)
                                 val chunk = bytesMessage.substring(2 + length).toByteArray()
                                 if (chunk.isNotEmpty()) {
@@ -95,7 +99,14 @@ class EdgeClient(private val endpoint: String = "wss://speech.platform.bing.com/
                         }
                         override fun onMessage(webSocket: WebSocket, text: String) {
                             if (done.get()) return
-                            if (text.substringBefore("\r\n\r\n").lineSequence().any { it.trim() == "Path:turn.end" }) {
+                            attempt?.message(binary = false)
+                            val headers = EdgeProtocol.headers(text.substringBefore("\r\n\r\n"))
+                            val path = EdgeProtocol.path(headers)
+                            attempt?.path(path)
+                            EdgeProtocol.error(headers, text.substringAfter("\r\n\r\n", ""))?.let {
+                                attempt?.protocolError(it); return fail("SERVER_PROTOCOL_ERROR", webSocket)
+                            }
+                            if (path == "turn.end") {
                                 val audio = bytes.toByteArray()
                                 if (audio.size < 100) return fail("NO_AUDIO", webSocket)
                                 if (done.compareAndSet(false, true)) {

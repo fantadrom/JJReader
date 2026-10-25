@@ -11,13 +11,14 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
     private var generation = 0L
     private var sessionId = UUID.randomUUID().toString()
     private var closed = false
-    @Synchronized fun beginRun(value: Long) { generation = value; sessionId = UUID.randomUUID().toString(); attempts.clear(); publish() }
+    private var purpose = "reading"
+    @Synchronized fun beginRun(value: Long, mode: String = "reading") { purpose = mode; generation = value; sessionId = UUID.randomUUID().toString(); attempts.clear(); publish() }
     @Synchronized fun continueRun(value: Long) { generation = value; publish() }
-    @Synchronized fun attempt(voice: Voice, source: String = "pending", block: Int = 0, number: Int = 1): Attempt {
+    @Synchronized fun attempt(voice: Voice, source: String = "pending", block: Int = 0, number: Int = 1, maxAttempts: Int = 3): Attempt {
         val id = UUID.randomUUID().toString()
         val now = System.nanoTime()
         attempts[id] = JSONObject().put("id", id).put("generation", generation).put("voice", voice.wire)
-            .put("audioBytes", 0).put("audioFrames", 0).put("block", block).put("networkAttempt", if (source == "cache") 0 else number).put("maxAttempts", 3)
+            .put("audioBytes", 0).put("audioFrames", 0).put("block", block).put("networkAttempt", if (source == "cache") 0 else number).put("maxAttempts", maxAttempts).put("textMessages", 0).put("binaryMessages", 0).put("paths", JSONObject()).put("protocolError", false)
             .put("timeUtc", Instant.now().toString()).put("stage", "cache").put("source", source)
         while (attempts.size > 32) attempts.remove(attempts.keys.first())
         publish()
@@ -60,7 +61,7 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
         }
         publish()
     }
-    @Synchronized fun text(): String = JSONObject().put("schema", 2).put("sessionId", sessionId).put("generation", generation)
+    @Synchronized fun text(): String = JSONObject().put("schema", 3).put("purpose", purpose).put("sessionId", sessionId).put("generation", generation)
         .put("attempts", JSONArray(attempts.values.toList())).toString(2)
     private fun publish() { persist(text()) }
     @Synchronized fun close() { closed = true }
@@ -68,6 +69,16 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
         if (closed) return
         val row = attempts[id] ?: return
         row.put("audioBytes", row.optInt("audioBytes") + bytes).put("audioFrames", row.optInt("audioFrames") + 1)
+        publish()
+    }
+    @Synchronized internal fun protocol(id: String, field: String, value: Any) {
+        if (closed) return
+        val row = attempts[id] ?: return
+        when (field) {
+            "textMessages", "binaryMessages" -> row.put(field, row.optInt(field) + 1)
+            "path" -> row.getJSONObject("paths").let { it.put(value.toString(), it.optInt(value.toString()) + 1) }
+            else -> row.put(field, value)
+        }
         publish()
     }
     @Synchronized internal fun retry(voice: Voice, block: Int, number: Int, run: Long, session: String): Attempt {
@@ -79,6 +90,13 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
                                        private val voice: Voice, private val block: Int, val number: Int, private val run: Long, private val session: String) {
         var latest: Attempt = this; private set
         fun retry(number: Int): Attempt = owner.retry(voice, block, number, run, session).also { latest = it }
+        fun wireName() = owner.protocol(id, "wireNameKind", "full")
+        fun sent(config: Boolean, ssml: Boolean) {
+            owner.protocol(id, "configSendAccepted", config); owner.protocol(id, "ssmlSendAccepted", ssml)
+        }
+        fun message(binary: Boolean) = owner.protocol(id, if (binary) "binaryMessages" else "textMessages", 1)
+        fun path(value: String) = owner.protocol(id, "path", value)
+        fun protocolError(category: String) { owner.protocol(id, "protocolError", true); owner.protocol(id, "protocolCategory", category) }
         fun audio(bytes: Int) { owner.audio(id, bytes) }
         @Volatile var stage: String = "cache"; private set
         fun record(stage: String, source: String? = null, http: Int? = null, close: Int? = null, error: Throwable? = null, code: String? = null) {

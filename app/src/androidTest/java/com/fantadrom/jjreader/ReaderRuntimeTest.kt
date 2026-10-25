@@ -21,6 +21,7 @@ import com.fantadrom.jjreader.notes.NoteStore
 import com.fantadrom.jjreader.regression.ReaderRuntimeActivity
 import kotlinx.coroutines.*
 import org.json.JSONObject
+import org.hamcrest.Matchers.containsString
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -115,6 +116,47 @@ class ReaderRuntimeTest {
                 while (!withContext(Dispatchers.Main) { LocatorBridge(a).call(nav(a), "({visible:Array.from(document.querySelectorAll('[id^=\"r2-decoration-\"] *')).some(e=>parseFloat(getComputedStyle(e).borderBottomWidth)>=3 && e.getBoundingClientRect().width>0 && getComputedStyle(e).borderBottomColor==='rgb(34, 103, 208)')})")!!.getBoolean("visible") }) delay(100)
             }
             withContext(Dispatchers.Main) { nav(a).applyDecorations(emptyList(), "tts") }
+        }
+    }
+    @Test fun noteX1RotateNoteX2RotateAndRecreateRepeatedWithImmediateAndDelayedRotation() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click()); var a=ready(scenario)
+            suspend fun addNote(paragraph:String,comment:String) {
+                longPressWord(a,paragraph);onView(withText("Пометка")).perform(click())
+                onView(withHint("Короткий комментарий")).perform(replaceText(comment),closeSoftKeyboard())
+                onView(withText("Сохранить")).perform(click());a=ready(scenario)
+            }
+            addNote("p1","x1")
+            onView(withText("Раздел →")).perform(click())
+            withTimeout(12000){while(withContext(Dispatchers.Main){a.readerSessionForTests()!!.chapterIndex()}!=1)delay(32)}
+            withContext(Dispatchers.Main){a.readerSessionForTests()!!.context(1)}
+            addNote("p2","x2")
+            suspend fun assertChapter(index:Int) {
+                a=ready(scenario)
+                withContext(Dispatchers.Main){
+                    assertEquals(index,a.readerSessionForTests()!!.chapterIndex())
+                    a.readerSessionForTests()!!.context(index)
+                    assertEquals(index,state(a).getJSONObject("positionV2").getInt("chapter"))
+                }
+            }
+            suspend fun jump(index:Int) {
+                onView(withText("Пометки · 2")).perform(click())
+                onView(withText(containsString(" — x${index+1}"))).perform(click())
+                withTimeout(12000){while(withContext(Dispatchers.Main){state(activity(scenario)).optJSONObject("positionV2")?.optInt("chapter")}!=index)delay(16)}
+                assertChapter(index)
+            }
+            suspend fun rotate(index:Int) {
+                val old=activity(scenario)
+                scenario.onActivity{it.requestedOrientation=if(it.resources.configuration.orientation==Configuration.ORIENTATION_PORTRAIT)ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT}
+                withTimeout(15000){while(activity(scenario)===old)delay(32)}
+                assertChapter(index)
+            }
+            for(wait in listOf(0L,2500L))repeat(2){
+                jump(0);delay(wait);rotate(0)
+                jump(1);delay(wait);rotate(1)
+                scenario.recreate();assertChapter(1)
+                assertEquals(2,withContext(Dispatchers.Main){state(a).getJSONArray("notes").length()})
+            }
         }
     }
     private suspend fun longPressWord(a: ReaderRuntimeActivity, paragraph: String) {
