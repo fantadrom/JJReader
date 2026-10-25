@@ -4,6 +4,7 @@ package com.fantadrom.jjreader
 import kotlinx.coroutines.runBlocking
 import org.readium.r2.navigator.epub.css.UserProperties
 import org.readium.r2.navigator.epub.css.View
+import org.readium.r2.navigator.epub.css.Length
 import org.readium.r2.shared.publication.Layout
 import org.readium.r2.shared.publication.Manifest
 import org.readium.r2.shared.publication.Metadata
@@ -20,7 +21,8 @@ object ReadiumInjection {
         val assets = checkNotNull(AbsoluteUrl("https://readium_assets/"))
         val cssType = Class.forName("org.readium.r2.navigator.epub.css.ReadiumCss")
         val constructor = cssType.constructors.single { it.parameterCount == 8 }
-        val css = constructor.newInstance(null, null, UserProperties(view = View.SCROLL, pageMargins = 2.0), null, null, assets, 27, null)
+        val css = constructor.newInstance(null, null, UserProperties(view = View.SCROLL, pageMargins = 2.0,
+            advancedSettings = true, fontSize = Length.Percent(1.0)), null, null, assets, 27, null)
         val publication = Publication(Manifest(metadata = Metadata(layout = Layout.REFLOWABLE)))
         try {
             val resource = Class.forName("org.readium.r2.navigator.epub.HtmlInjectorKt").methods.single { it.name == "injectHtml" }

@@ -8,6 +8,7 @@
 | jsoup | 1.23.2, https://github.com/jhy/jsoup | MIT |
 | AndroidX / Compose | точные прямые версии в Gradle, https://android.googlesource.com/platform/frameworks/support | Apache-2.0 |
 | Kotlin / coroutines | Kotlin 2.4.20, зависимости Readium, https://github.com/JetBrains/kotlin | Apache-2.0 |
+| Playwright core, только browser-регрессия | 1.62.1, не входит в APK, https://github.com/microsoft/playwright | Apache-2.0 |
 | jsdom, только проверка DOM в Node | 26.1.0, не входит в APK, https://github.com/jsdom/jsdom | MIT |
 
 Полные тексты и уведомления включены в `app/src/main/assets/licenses`, в том числе Readium BSD, Apache-2.0, jsoup MIT, LGPL и GPL v3. Оригинальные уведомления upstream Edge сохранены в `edge-protocol/LICENSE`, GPL v3 — в `edge-protocol/COPYING`, изменения порта — в `edge-protocol/NOTICE`. Python-клиент edge-tts в приложение не встраивается. Протокол WebSocket реализован отдельным Kotlin-адаптером; портирован только алгоритм Sec-MS-GEC v2 в отдельном Java-модуле. Встроенных персональных ключей, Azure-аккаунта и прокси-сервера приложения нет. Публичный идентификатор протокола не является Azure subscription key.

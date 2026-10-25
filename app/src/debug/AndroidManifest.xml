@@ -3,5 +3,6 @@
     <application>
         <!-- Instrumentation-only host: no launcher/filter, no access from other apps. -->
         <activity android:name=".regression.RenderRegressionActivity" android:exported="false" />
+        <activity android:name=".regression.ReaderRuntimeActivity" android:exported="false" />
     </application>
 </manifest>

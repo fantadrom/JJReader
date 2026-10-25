@@ -29,7 +29,10 @@ object SafeHtml {
             }.forEach { element.removeAttr(it.key) }
         }
         doc.head().prependElement("meta").attr("http-equiv", "Content-Security-Policy").attr("content",
-            "default-src 'none'; script-src https://readium_assets; style-src 'unsafe-inline' https://readium_assets https://readium_package; img-src https://readium_package data:; font-src https://readium_package https://readium_assets data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
+            // CSP host grammar rejects Readium's underscore virtual hosts. Restrict trusted
+            // engine code/styles by HTTPS path; publication networking is independently denied
+            // by ReadiumEngine's offline HttpClient and local-resource WebView interceptor.
+            "default-src 'none'; script-src https://*/readium/scripts/readium-reflowable.js; style-src 'unsafe-inline' 'self' https://*/readium/readium-css/; img-src 'self' data:; font-src 'self' data: https://*/readium/fonts/; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
         doc.outputSettings().prettyPrint(false).charset(Charsets.UTF_8)
             .syntax(if (xhtml) Document.OutputSettings.Syntax.xml else Document.OutputSettings.Syntax.html)
             .escapeMode(if (xhtml) Entities.EscapeMode.xhtml else Entities.EscapeMode.base)

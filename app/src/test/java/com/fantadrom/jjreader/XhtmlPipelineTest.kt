@@ -1,6 +1,9 @@
 package com.fantadrom.jjreader
 
 import com.fantadrom.jjreader.engine.SafeHtml
+import com.fantadrom.jjreader.engine.ReaderDecorations
+import org.readium.r2.navigator.Decoration
+import org.readium.r2.shared.publication.Locator
 import com.fantadrom.jjreader.text.TextModel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -73,6 +76,11 @@ class XhtmlPipelineTest {
             fixtures.put(JSONObject().put("file", "$name.injected.xhtml").put("safe", "$name.safe.xhtml").put("normalized", TextModel.normalize(safe)))
         }
         File(output, "manifest.json").writeText(JSONObject().put("readium", "3.4.0").put("fixtures", fixtures).toString(2))
+        val templates = ReaderDecorations.templates()
+        val locator = checkNotNull(Locator.fromJSON(JSONObject().put("href", "EPUB/c1.xhtml").put("type", "application/xhtml+xml")))
+        val decoration = Decoration("tts", locator, Decoration.Style.Underline(ReaderDecorations.BLUE))
+        File(output, "decorations.json").writeText(JSONObject().put("templates", templates.toJSON())
+            .put("decoration", decoration.toJSON().put("element", checkNotNull(templates[Decoration.Style.Underline::class]).element(decoration))).toString(2))
     }
     @Test fun htmlAndXhtmlUseTheirOwnSerializationAndKeepGuards() {
         val input = """<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Защита</title></head><body onload="steal()"><p onclick="x()">Текст</p><script>steal()</script><img src="https://example.com/x"/><img src="local.png"/><a href="javascript:x()">ссылка</a><iframe srcdoc="x"/></body></html>"""

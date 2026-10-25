@@ -13,8 +13,8 @@ android {
         applicationId = "com.fantadrom.jjreader"
         minSdk = 31
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.1.1-p0"
+        versionCode = 3
+        versionName = "0.1.2-p0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -73,6 +73,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation("org.json:json:20250517")
     testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

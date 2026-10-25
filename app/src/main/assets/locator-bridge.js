@@ -5,6 +5,8 @@
   const blocks = new Set('p div section article h1 h2 h3 h4 h5 h6 li blockquote tr td figcaption pre br'.split(' '));
   const excluded = new Set('script style nav noscript iframe object svg math template'.split(' '));
   const chars = [], points = [];
+  const documentId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random();
+  let selectionSession = null, selectionCache = null, restoreResult = null;
   function sep() {
     while (chars[chars.length - 1] === ' ') { chars.pop(); points.pop(); }
     if (chars.length && chars[chars.length - 1] !== '\n') { chars.push('\n', '\n'); points.push(null, null); }
@@ -67,10 +69,7 @@
       locatorText: {highlight: x.r.toString(), before: before.toString(), after: after.toString()},
       locations: {cssSelector: selector(scope), domRange: {start: point(points[x.a], false), end: point(points[x.b - 1], true)}}};
   }
-  function selection() {
-    const s = window.getSelection();
-    if (!s || !s.rangeCount || s.isCollapsed) return null;
-    const r = s.getRangeAt(0);
+  function fromRange(r) {
     let first = -1, last = -1;
     points.forEach((p, i) => {
       if (!p) return;
@@ -80,6 +79,41 @@
       }
     });
     return first >= 0 ? anchor(first, last) : null;
+  }
+  function selection() {
+    const s = window.getSelection();
+    return s && s.rangeCount && !s.isCollapsed ? fromRange(s.getRangeAt(0)) : null;
+  }
+  document.addEventListener('selectionchange', () => {
+    const current = selection();
+    if (current) selectionCache = current;
+  });
+  function context() {
+    const p = document.querySelector('p') || document.body;
+    return {documentId, url:document.URL, count:chars.length, nativeReady:typeof window.readium === 'object',
+      fontSize:parseFloat(getComputedStyle(p).fontSize), fontScale:parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--USER__fontSize')) / 100};
+  }
+  function beginSelection(session) { selectionSession=session; selectionCache=selection() || selectionCache; return context(); }
+  function takeSelection(session) {
+    if (selectionSession !== session) return null;
+    const current=selection() || selectionCache;
+    if (!current) return null;
+    const native=window.readium && readium.getCurrentSelection ? readium.getCurrentSelection() : null;
+    return Object.assign(context(), {anchor:current, session, readiumSelection:!!native});
+  }
+  function resolveDom(dom) {
+    function resolve(p) {
+      const e=document.querySelector(p.cssSelector);
+      const n=e && Array.from(e.childNodes).filter(n=>n.nodeType===3)[p.textNodeIndex];
+      if (!n || p.charOffset < 0 || p.charOffset > n.length) return null;
+      return {n, offset:p.charOffset || 0};
+    }
+    try {
+      const a=resolve(dom.start), b=resolve(dom.end || dom.start); if (!a || !b) return null;
+      const r=document.createRange();r.setStart(a.n,a.offset);r.setEnd(b.n,b.offset);
+      if (r.collapsed) r.setEnd(a.n,Math.min(a.n.length,a.offset+Array.from(a.n.data.slice(a.offset))[0].length));
+      return fromRange(r);
+    } catch (_) { return null; }
   }
   function visible() {
     let first = -1, last = -1;
@@ -101,5 +135,19 @@
     const x = range(a, b); if (!x) return false;
     const rect = x.r.getBoundingClientRect(); window.scrollBy(0, rect.top - 40); return true;
   }
-  window.JJ = {text: chars.join(''), selection, visible, anchor, go};
+  function viewport() {
+    const v=visible();
+    return Object.assign(context(),v,{anchor:v.first>=0 ? anchor(v.first,v.first+1) : null});
+  }
+  function requestRestore(id,a,b) {
+    restoreResult=null;
+    if (!go(a,b)) return false;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      const x=range(a,b);
+      const shown=x && Array.from(x.r.getClientRects()).some(r=>r.bottom>0 && r.top<innerHeight);
+      restoreResult=Object.assign(context(),{id,shown:!!shown,start:a,end:b,viewport:visible()});
+    }));
+    return true;
+  }
+  window.JJ = {text: chars.join(''), selection, visible, anchor, go, context, viewport, beginSelection, takeSelection, resolveDom, requestRestore, restoreStatus:()=>restoreResult};
 })();
