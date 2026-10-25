@@ -1,4 +1,4 @@
-"""Package a verified P0 checkout. Keystore is included only when explicitly requested."""
+"""Package a verified P0 checkout. Signing keys are never included."""
 import argparse, hashlib, json, shutil, subprocess, zipfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -6,7 +6,6 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--output',required=True,type=Path)
 parser.add_argument('--pr-url',default=None)
 parser.add_argument('--verification-log',type=Path)
-parser.add_argument('--debug-keystore',type=Path)
 a=parser.parse_args();root=Path(__file__).resolve().parents[1];out=a.output.resolve();out.mkdir(parents=True,exist_ok=True)
 if subprocess.check_output(['git','status','--porcelain'],cwd=root).strip(): raise SystemExit('Refusing to package uncommitted sources')
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
@@ -34,10 +33,6 @@ with zipfile.ZipFile(out/'JJReader-P0-sources.zip','w',zipfile.ZIP_DEFLATED) as 
  for item in subprocess.check_output(['git','ls-files','-z'],cwd=root).split(b'\0'):
   if item:
    relative=Path(item.decode());z.write(root/relative,Path('JJReader')/relative)
-if a.debug_keystore:
- with zipfile.ZipFile(out/'JJReader-P0-debug-signing.zip','w',zipfile.ZIP_DEFLATED) as z:
-  z.write(a.debug_keystore,'.local/jjreader-debug.keystore')
-  z.writestr('README.txt','Debug/test key only. Keep out of Git. Set JJREADER_DEBUG_KEYSTORE to this file before rebuilding. Password/key alias are standard Android debug defaults. See supplied README.md.\n')
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 artifacts={p.name:{'bytes':p.stat().st_size,'sha256':sha(p)} for p in out.iterdir() if p.is_file() and p.name not in ['DELIVERY.json','SHA256SUMS.txt']}
 value={'versionName':'0.1.0-p0','versionCode':1,'applicationId':'com.fantadrom.jjreader','branch':branch,'commit':commit,'draft_pr':a.pr_url,'android_runtime':'NOT_RUN','honor':'NOT_RUN','edge_cloud':'BLOCKED: proxy CONNECT 403','unit_tests':tests,'artifacts':artifacts}
