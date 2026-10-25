@@ -14,9 +14,17 @@ android {
         minSdk = 31
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.1.0-p0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    providers.environmentVariable("JJREADER_DEBUG_KEYSTORE").orNull?.let { debugKey ->
+        signingConfigs.getByName("debug") {
+            storeFile = file(debugKey)
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
@@ -28,6 +36,7 @@ android {
         }
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -37,6 +46,15 @@ android {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+    implementation(project(":edge-protocol"))
+    implementation("org.readium.kotlin-toolkit:readium-shared:3.4.0")
+    implementation("org.readium.kotlin-toolkit:readium-streamer:3.4.0")
+    implementation("org.readium.kotlin-toolkit:readium-navigator:3.4.0")
+    implementation("androidx.fragment:fragment-ktx:1.9.0")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("org.jsoup:jsoup:1.23.2")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
@@ -46,6 +64,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20250517")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -24,4 +24,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "JJReader"
 include(":app")
- 
+include(":edge-protocol")
+
