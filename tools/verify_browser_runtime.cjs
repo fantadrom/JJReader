@@ -40,7 +40,8 @@ fs.mkdirSync(out,{recursive:true});
  const ready=async()=>{await page.waitForFunction(()=>typeof window.readium==='object');await page.evaluate(bridge);};
  const restore=async(id,a,b)=>{
   assert.equal(await page.evaluate(({id,a,b})=>JJ.requestRestore(id,a,b),{id,a,b}),true);
-  await page.waitForFunction(id=>JJ.restoreStatus()?.id===id,id);
+  await page.waitForFunction(id=>{const s=JJ.restoreStatus();return s?.id===id && ['confirmed','failed'].includes(s.phase);},id);
+  assert.equal(await page.evaluate(()=>JJ.restoreStatus().phase),'confirmed',JSON.stringify(await page.evaluate(()=>JJ.restoreStatus())));
   assert.equal(await page.evaluate(()=>JJ.restoreStatus().shown),true);
  };
  try{
@@ -127,6 +128,48 @@ fs.mkdirSync(out,{recursive:true});
   await page.screenshot({path:path.join(out,'chromium-underline.png')});
   await page.evaluate(()=>readium.getDecorations('tts').clear());
   assert.equal(await page.locator('[id^="r2-decoration-"]').count(),0);
+  // ACK geometry regressions on the real browser layout, including short landscape frames.
+  await page.setViewportSize({width:1000,height:24});
+  const legacyNegativeGeometry=await page.evaluate(()=>{
+   const a=JJ.anchor(1501,1504),point=a.locations.domRange.start;
+   const element=document.querySelector(point.cssSelector),node=Array.from(element.childNodes).filter(n=>n.nodeType===3)[point.textNodeIndex];
+   const r=document.createRange();r.setStart(node,point.charOffset);r.setEnd(node,point.charOffset+1);
+   window.scrollBy(0,r.getBoundingClientRect().top-40);
+   const rect=r.getBoundingClientRect();return {viewportHeight:innerHeight,top:rect.top,bottom:rect.bottom,shown:rect.bottom>0 && rect.top<innerHeight};
+  });
+  assert.equal(legacyNegativeGeometry.shown,false,JSON.stringify(legacyNegativeGeometry));
+  const ackGeometry=[];
+  const length=Array.from(meta.fixtures.find(x=>x.file==='c1.injected.xhtml').normalized).length;
+  for(const height of [24,32,40,400]) {
+   await page.setViewportSize({width:1000,height});
+   for(const target of [0,1500,length-2]) {
+    await restore(`short-${height}-${target}`,target,target+1);
+    const status=await page.evaluate(()=>JJ.restoreStatus());
+    assert.equal(status.shown,true);assert.equal(status.layoutStable,true);
+    assert.ok(status.firstRect.bottom>0 && status.firstRect.top<height,JSON.stringify(status));
+    ackGeometry.push({height,target,status});
+   }
+  }
+  await page.setViewportSize({width:1000,height:40});
+  await page.evaluate(()=>{window.__jjHeight=Object.getOwnPropertyDescriptor(window,'innerHeight');Object.defineProperty(window,'innerHeight',{value:0,configurable:true});JJ.requestRestore('zero-layout',1500,1501)});
+  assert.equal(await page.evaluate(()=>JJ.restoreStatus().phase),'layout_wait');
+  await page.evaluate(()=>{Object.defineProperty(window,'innerHeight',window.__jjHeight);delete window.__jjHeight});
+  await page.waitForFunction(()=>JJ.restoreStatus()?.phase==='confirmed');
+  assert.equal(await page.evaluate(()=>JJ.restoreStatus().phase),'confirmed',JSON.stringify(await page.evaluate(()=>JJ.restoreStatus())));
+  assert.equal(await page.evaluate(()=>JJ.restoreStatus().shown),true);
+  // Do not repeatedly walk backwards when the same target is restored across reflow.
+  let retained=1500;
+  const drift=[];
+  for(let n=0;n<8;n++) {
+   await page.setViewportSize({width:n%2?430:1000,height:n%2?650:40});
+   await restore(`drift-${n}`,retained,retained+1);
+   await page.evaluate(()=>JJ.viewport());await page.waitForTimeout(45);
+   const snap=await page.evaluate(()=>JJ.viewport());
+   assert.equal(snap.anchor.start,retained);drift.push(snap.anchor.start);
+  }
+  await page.evaluate(()=>{JJ.requestRestore('user-interrupt',1500,1501);document.dispatchEvent(new Event('wheel'))});
+  assert.equal(await page.evaluate(()=>JJ.restoreStatus().reason),'RESTORE_INTERRUPTED');
+  await page.setViewportSize({width:720,height:400});
   // A book's inline script remains forbidden; evaluation here stands in for native app code.
   const previousErrors=errors.length;
   await page.evaluate(()=>{window.bookScriptRan=false;const s=document.createElement('script');s.textContent='window.bookScriptRan=true';document.head.appendChild(s)});
@@ -134,7 +177,7 @@ fs.mkdirSync(out,{recursive:true});
   const expectedBlock=errors.splice(previousErrors);
   assert.ok(expectedBlock.some(x=>x.includes('Content Security Policy')));
   assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
-  const result={status:'PASS',environment:'desktop Linux Chromium; Java callbacks stubbed; NOT Android/Honor',layout,documents,font:{before,after},selection:'exact cached DOM range with empty native API',restore:'reload + resized viewport',decoration:{visible:true,styles:style},csp:'Readium loaded; book inline script blocked; no outbound requests',cases:8};
+  const result={status:'PASS',environment:'desktop Linux Chromium; Java callbacks stubbed; NOT Android/Honor',layout,documents,legacyNegativeGeometry,ackGeometry,drift,font:{before,after},selection:'exact cached DOM range with empty native API',restore:'reload + resized viewport',decoration:{visible:true,styles:style},csp:'Readium loaded; book inline script blocked; no outbound requests',cases:11};
   fs.writeFileSync(path.join(out,'browser-results.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
  }finally{await browser.close()}
 })().catch(error=>{console.error(error);process.exit(1)});

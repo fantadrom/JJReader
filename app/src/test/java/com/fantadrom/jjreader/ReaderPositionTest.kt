@@ -29,7 +29,7 @@ class ReaderPositionTest {
         var viewportAnchor: JSONObject? = null
         override fun chapterIndex()=index
         private fun context()=JSONObject().put("url","https://readium_package/"+book.chapters[index].href)
-            .put("documentId","$index-$document").put("nativeReady",true)
+            .put("documentId","$index-$document").put("nativeReady",true).put("viewportWidth",430).put("viewportHeight",650).put("layoutReady",true).put("layoutStable",true).put("shown",true)
         override suspend fun text()=book.chapters[index].text
         override suspend fun goResource(index:Int):Boolean {this.index=index;document++;return true}
         override suspend fun go(locator:Locator) { index=book.chapters.indexOfFirst{it.href==locator.href.toString()};document++ }
@@ -40,7 +40,7 @@ class ReaderPositionTest {
                 restoreId=expression.substringAfter("requestRestore(\"").substringBefore('"')
                 target=expression.substringAfter("\",").substringBefore(',').toInt();JSONObject().put("ok",true)
             }
-            expression=="JJ.restoreStatus()" -> context().put("id",restoreId).put("shown",true)
+            expression=="JJ.restoreStatus()" -> context().put("id",restoreId).put("shown",true).put("phase","confirmed")
             expression=="JJ.viewport()" -> {
                 val saved=viewportAnchor?.let{context().put("anchor",JSONObject(it.toString()))}
                 val gate=viewportGate;viewportGate=null;gate?.await();saved

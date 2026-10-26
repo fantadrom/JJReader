@@ -206,11 +206,9 @@ open class MainActivity : AppCompatActivity() {
         readerJob = lifecycleScope.launch {
             var draftShown = false
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                try { if (!reader.ready && editor == null) reader.restoreInitial() }
-                catch (e: Exception) { if (e !is StaleReaderOperation) { handle(e); return@repeatOnLifecycle } }
-                if (!draftShown) {
-                    draftShown = true
-                    newNotes.data.optJSONObject("draft")?.let { editNote(it) }
+                launch {
+                    try { if (reader.shouldRestoreInitial && editor == null) reader.restoreInitial() }
+                    catch(e: Exception) { handle(e) } // Keep observation/capture siblings alive after an initial ACK failure.
                 }
                 launch {
                     nav.currentLocator.collect { locator ->
@@ -218,12 +216,16 @@ open class MainActivity : AppCompatActivity() {
                         // Engine start/progression events are observations, never durable anchors.
                         newNotes.data.put("engineLocator", locator.toJSON())
                         reader.traceState(ReadingTrace.Event.NATIVE,ReadingTrace.Source.NATIVE)
+                        reader.observeResource()
                         if (speechChapter != null && speechChapter != reader.chapterIndex()) { player.reset(); speechChapter = null }
                     }
                 }
                 launch {
                     while (isActive) {
                         try { updateViewport(nav) } catch (e: Exception) { if (e is CancellationException && e !is StaleReaderOperation) throw e; progress.text = "Процент: DOM ещё не готов" }
+                        if(!draftShown && reader.ready) {
+                            draftShown=true;newNotes.data.optJSONObject("draft")?.let{editNote(it)}
+                        }
                         delay(350)
                     }
                 }
@@ -253,6 +255,7 @@ open class MainActivity : AppCompatActivity() {
     private fun changeResource(delta: Int) {
         val nav = navigator ?: return; val pub = publication ?: return
         player.reset(); speechChapter = null; val index = chapterIndex(nav) + delta
+        navigationJob?.cancel(); resizeJob?.cancel(); session?.userNavigation()
         if (index in pub.readingOrder.indices) nav.go(pub.readingOrder[index], animated = false)
     }
     private suspend fun updateViewport(nav: EpubNavigatorFragment) {
@@ -350,10 +353,14 @@ open class MainActivity : AppCompatActivity() {
             val note = JSONObject(list[which].toString())
             navigationJob?.cancel(); resizeJob?.cancel()
             navigationJob = lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                try { reader.navigateTo(note) } catch (e: Exception) {
+                try {
+                    reader.navigateTo(note)
+                    if(reader.lastRestoreCode!=null)status.text="Сохранено проверенное видимое место. Точный диапазон не подтверждён; доступна диагностика."
+                } catch (e: Exception) {
                     readingTrace.record(ReadingTrace.Event.REJECT,ReadingTrace.Source.NOTE,activityId,reader.id,reader.book.id,
                         target=note.optInt("chapter"),observed=reader.chapterIndex(),ready=reader.ready,
-                        reason=if(e is CancellationException)ReadingTrace.Reason.CANCELLED else ReadingTrace.Reason.ERROR)
+                        reason=if(e is CancellationException)ReadingTrace.Reason.CANCELLED else ReadingTrace.Reason.ERROR,
+                        failureCode=(e as? RestoreFailure)?.code)
                     handle(e)
                 }
             }
@@ -396,6 +403,9 @@ open class MainActivity : AppCompatActivity() {
     private fun persist() { try { notes?.save(NoteStore.Source.ACTIVITY) } catch (e: Exception) { handle(e) } }
     private fun handle(e: Exception) {
         if (e is StaleReaderOperation) return
+        if (e is RestoreFailure) {
+            status.text="Место не подтверждено (${e.code}). Проверяется текущий видимый текст; доступна диагностика.";return
+        }
         if (e is CancellationException) throw e
         status.text = e.message?.takeIf { !it.contains("<") && it.length < 180 } ?: "Не удалось выполнить действие. Данные книги сохранены."
     }
@@ -404,12 +414,23 @@ open class MainActivity : AppCompatActivity() {
         readingTrace.record(ReadingTrace.Event.PAUSE,ReadingTrace.Source.LIFECYCLE,activityId)
         session?.traceState(ReadingTrace.Event.PAUSE,ReadingTrace.Source.LIFECYCLE)
         player.pause()
+        val reader=session
+        reader?.preparePause()
         navigationJob?.cancel()
         resizeJob?.cancel()
         lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            try { session?.capture() } catch (e: Exception) { if (e is CancellationException) throw e }
+            try {
+                if(reader?.capture()==null || !reader.ready) {
+                    reader?.traceFallback()
+                    status.text="Сохранено последнее подтверждённое место; текущий снимок недоступен. Диагностика содержит причину."
+                }
+            } catch(e: Exception) {
+                reader?.traceFallback()
+                if(e is CancellationException)throw e
+            }
         }
-        persist(); window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause()
+        // capture commits itself. Do not rewrite an old anchor as though it were the paused view.
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause()
     }
     override fun onDestroy() { readingTrace.record(ReadingTrace.Event.DESTROY,ReadingTrace.Source.LIFECYCLE,activityId); session?.traceState(ReadingTrace.Event.DESTROY,ReadingTrace.Source.LIFECYCLE); session?.freeze(); editor?.dismiss(); resizeJob?.cancel(); readerJob?.cancel(); player.close(); super.onDestroy(); publication?.close() }
     companion object { private const val READER_ID = 23001 }

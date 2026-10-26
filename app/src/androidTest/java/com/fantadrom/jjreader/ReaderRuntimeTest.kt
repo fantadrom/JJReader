@@ -17,6 +17,9 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import com.fantadrom.jjreader.books.BookStore
 import com.fantadrom.jjreader.engine.LocatorBridge
 import com.fantadrom.jjreader.engine.ReaderDecorations
+import com.fantadrom.jjreader.engine.RestoreCode
+import com.fantadrom.jjreader.engine.RestoreFailure
+import com.fantadrom.jjreader.engine.ReaderSession
 import com.fantadrom.jjreader.notes.NoteStore
 import com.fantadrom.jjreader.regression.ReaderRuntimeActivity
 import kotlinx.coroutines.*
@@ -213,6 +216,64 @@ class ReaderRuntimeTest {
             }
         }
     }
+    @Test fun realWebViewAcceptedRestoreWithFailedAckRecoversSecondResourceAndRecreatesThere() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());val a=ready(scenario)
+            withContext(Dispatchers.Main) {
+                val reader=checkNotNull(a.readerSessionForTests());val op=reader.freeze()
+                val locator=checkNotNull(org.readium.r2.shared.publication.Locator.fromJSON(JSONObject()
+                    .put("href",reader.book.chapters[1].href).put("type","application/xhtml+xml")))
+                assertTrue(nav(a).go(locator,animated=false));reader.context(1)
+                val bridge=LocatorBridge(a);val target=bridge.call(nav(a),"JJ.anchor(150,160)")!!.put("chapter",1)
+                // Force the exact accepted-request -> ANCHOR_NOT_VISIBLE check on the real document.
+                bridge.call(nav(a),"(function(){const original=JJ.restoreStatus;JJ.restoreStatus=()=>{const s=original();return s?Object.assign(s,{phase:'confirmed',shown:false}):s};return {ok:true};})()")
+                reader.restore(target,1,op)
+                assertEquals(RestoreCode.ANCHOR_NOT_VISIBLE,reader.lastRestoreCode);assertTrue(reader.ready)
+                assertEquals(1,NoteStore(a,reader.book.id).data.getJSONObject("positionV2").getInt("chapter"))
+            }
+            scenario.recreate();val next=ready(scenario)
+            withContext(Dispatchers.Main){
+                assertEquals(1,next.readerSessionForTests()!!.chapterIndex());next.readerSessionForTests()!!.context(1)
+                assertEquals(1,state(next).getJSONObject("positionV2").getInt("chapter"))
+                val report=next.readingTraceForTests().toString();assertTrue(report.contains("ANCHOR_NOT_VISIBLE"));assertTrue(report.contains("RECOVERY"))
+            }
+        }
+    }
+    @Test fun realInitialAckFailureDoesNotDisableLaterCaptureInNextResource() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());val a=ready(scenario)
+            withContext(Dispatchers.Main){
+                val bridge=LocatorBridge(a)
+                bridge.call(nav(a),"(function(){const status=JJ.restoreStatus,viewport=JJ.viewport;JJ.restoreStatus=()=>{const s=status();return s?Object.assign(s,{phase:'failed',reason:'ANCHOR_NOT_VISIBLE',shown:false}):s};JJ.viewport=()=>Object.assign(viewport(),{layoutReady:false});return {ok:true};})()")
+                try{a.readerSessionForTests()!!.restoreInitial();fail()}catch(e:RestoreFailure){assertEquals(RestoreCode.ANCHOR_NOT_VISIBLE,e.code)}
+                assertEquals(ReaderSession.Phase.RECOVERING,a.readerSessionForTests()!!.phase)
+            }
+            onView(withText("Раздел →")).perform(click())
+            withTimeout(15000){while(withContext(Dispatchers.Main){!a.readerSessionForTests()!!.ready || state(a).optJSONObject("positionV2")?.optInt("chapter")!=1})delay(50)}
+            scenario.recreate();val next=ready(scenario)
+            withContext(Dispatchers.Main){assertEquals(1,next.readerSessionForTests()!!.chapterIndex());next.readerSessionForTests()!!.context(1)}
+        }
+    }
+    @Test fun actualLowWebViewViewportAcknowledgesFirstReadableGlyph() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());val a=ready(scenario)
+            withContext(Dispatchers.Main){
+                val container=a.findViewById<android.view.View>(23001)
+                container.layoutParams=(container.layoutParams as android.widget.LinearLayout.LayoutParams).apply{weight=0f;height=(24*a.resources.displayMetrics.density).toInt()}
+                container.requestLayout()
+            }
+            val bridge=LocatorBridge(a)
+            withTimeout(12000){while(withContext(Dispatchers.Main){bridge.call(nav(a),"({height:innerHeight})")!!.getInt("height")} !in 1..40)delay(32)}
+            withContext(Dispatchers.Main){
+                val target=bridge.call(nav(a),"JJ.anchor(1500,1504)")!!.put("chapter",0)
+                a.readerSessionForTests()!!.restore(target)
+                val ack=bridge.call(nav(a),"JJ.restoreStatus()")!!
+                assertEquals("confirmed",ack.getString("phase"));assertTrue(ack.getBoolean("shown"));assertTrue(ack.getBoolean("layoutStable"))
+                assertTrue(ack.getJSONObject("firstRect").getDouble("top")<ack.getDouble("viewportHeight"))
+                try{bridge.call(nav(a),"(function(){throw new Error('PRIVATE');})()");fail()}catch(e:RestoreFailure){assertEquals(RestoreCode.JS_ERROR,e.code)}
+            }
+        }
+    }
     private suspend fun longPressWord(a: ReaderRuntimeActivity, paragraph: String) {
         // JS computes coordinates only. Selection is created by a genuine Android long-press.
         val point = withContext(Dispatchers.Main) {
@@ -233,6 +294,7 @@ class ReaderRuntimeTest {
         withContext(Dispatchers.Main) { LocatorBridge(a).call(nav(a), "({ok:JJ.requestRestore('test-middle',1500,1504)})") }
         return withTimeout(12000) {
             while (true) {
+                withContext(Dispatchers.Main){LocatorBridge(a).call(nav(a),"JJ.restoreStatus()")}
                 val position = withContext(Dispatchers.Main) { state(a).optJSONObject("positionV2") }
                 if (position != null && position.getInt("start") > 1200) return@withTimeout JSONObject(position.toString())
                 delay(100)

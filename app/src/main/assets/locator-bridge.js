@@ -7,6 +7,8 @@
   const chars = [], points = [];
   const documentId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random();
   let selectionSession = null, selectionCache = null, restoreResult = null;
+  let interaction = 0, pinned = null, viewportSample = null;
+  for (const event of ['pointerdown','touchstart','wheel']) document.addEventListener(event,()=>{interaction++;pinned=null;},{passive:true});
   function sep() {
     while (chars[chars.length - 1] === ' ') { chars.pop(); points.pop(); }
     if (chars.length && chars[chars.length - 1] !== '\n') { chars.push('\n', '\n'); points.push(null, null); }
@@ -131,23 +133,75 @@
     });
     return {first, last, count: chars.length};
   }
-  function go(a, b) {
-    const x = range(a, b); if (!x) return false;
-    const rect = x.r.getBoundingClientRect(); window.scrollBy(0, rect.top - 40); return true;
+  function rectValue(rect) {
+    return rect ? {left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height} : null;
   }
-  function viewport() {
-    const v=visible();
-    return Object.assign(context(),v,{anchor:v.first>=0 ? anchor(v.first,v.first+1) : null});
+  function geometry(a,b) {
+    const x=range(a,b);let r=null, firstOffset=null;
+    // A collapsed line-break space may have zero width. Find the first readable glyph,
+    // including the next glyph when the stored single code point itself is such a space.
+    if(x)for(let i=x.a;i<Math.min(chars.length,Math.max(x.b,x.a+64));i++) {
+      const first=range(i,i+1);
+      r=first && Array.from(first.r.getClientRects()).find(r=>r.width>0 && r.height>0);
+      if(r){firstOffset=i;break;}
+    }
+    const fontReady=!document.fonts || document.fonts.status==='loaded';
+    const layoutReady=innerWidth>0 && innerHeight>0 && document.readyState!=='loading' && fontReady;
+    return {viewportWidth:innerWidth,viewportHeight:innerHeight,scrollY,layoutReady,fontReady,
+      firstOffset,documentReady:document.readyState!=='loading',firstRect:rectValue(r),rangeRect:rectValue(x && x.r.getBoundingClientRect()),
+      shown:!!(layoutReady && r && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth)};
   }
-  function requestRestore(id,a,b) {
-    restoreResult=null;
-    if (!go(a,b)) return false;
-    requestAnimationFrame(()=>requestAnimationFrame(()=>{
-      const x=range(a,b);
-      const shown=x && Array.from(x.r.getClientRects()).some(r=>r.bottom>0 && r.top<innerHeight);
-      restoreResult=Object.assign(context(),{id,shown:!!shown,start:a,end:b,viewport:visible()});
-    }));
+  function scrollTarget(a,b) {
+    const g=geometry(a,b);
+    if (!g.layoutReady || !g.firstRect) return false;
+    // Align the first readable symbol, including viewports shorter than one text line.
+    // No fixed top inset: repeatedly restoring a first-visible point must not walk backwards.
+    if(Math.abs(g.firstRect.top)>1)window.scrollBy(0,g.firstRect.top);
     return true;
   }
-  window.JJ = {text: chars.join(''), selection, visible, anchor, go, context, viewport, beginSelection, takeSelection, resolveDom, requestRestore, restoreStatus:()=>restoreResult};
+  function go(a,b) { pinned=null;restoreResult=null;return scrollTarget(a,b); }
+  function viewport() {
+    const v=visible(), now=performance.now();
+    const key=[innerWidth,innerHeight,scrollY,document.documentElement.scrollHeight].join(':');
+    if (!viewportSample || viewportSample.key!==key) viewportSample={key,since:now};
+    let target=v.first>=0 ? anchor(v.first,v.first+1) : null;
+    if(pinned && pinned.interaction===interaction && Math.abs(scrollY-pinned.scrollY)<1 && geometry(pinned.a,pinned.b).shown)
+      target=anchor(pinned.a,pinned.b);
+    else pinned=null;
+    const g=geometry(target ? target.start : 0,target ? target.end : 1);
+    return Object.assign(context(),v,g,{anchor:target,interaction,layoutStable:g.layoutReady && now-viewportSample.since>=32});
+  }
+  function requestRestore(id,a,b) {
+    pinned=null;
+    if (!range(a,b)) { restoreResult=null;return false; }
+    restoreResult={id,a,b,phase:'pending',began:performance.now(),interaction,sample:null,stable:0};
+    scrollTarget(a,b); // Start immediately when layout permits; ACK still requires stable polling.
+    return true; // Accepted request, not a visibility acknowledgement.
+  }
+  function cancelRestore(id) { if(restoreResult && restoreResult.id===id)restoreResult=null; }
+  function restoreStatus() {
+    const q=restoreResult;if(!q)return null;
+    const now=performance.now();let g=geometry(q.a,q.b);
+    if(q.phase==='pending' || q.phase==='layout_wait') {
+      if(q.interaction!==interaction) {q.phase='failed';q.reason='RESTORE_INTERRUPTED';}
+      else if(now-q.began>=4000) {
+        q.phase='failed';q.reason=!g.layoutReady?'LAYOUT_TIMEOUT':!g.shown?'ANCHOR_NOT_VISIBLE':'LAYOUT_UNSTABLE';
+      } else if(!g.layoutReady || !g.firstRect) {q.phase='layout_wait';q.stable=0;q.sample=null;}
+      else {
+        scrollTarget(q.a,q.b);g=geometry(q.a,q.b);
+        const key=[g.viewportWidth,g.viewportHeight,g.scrollY,document.documentElement.scrollHeight,
+          ...Object.values(g.firstRect || {}).map(x=>Math.round(x*2)/2)].join(':');
+        if(!q.sample || q.sample.key!==key) {q.sample={key,time:now};q.stable=0;}
+        else if(now-q.sample.time>=32) {q.sample.time=now;q.stable++;}
+        q.phase='pending';
+        if(g.shown && q.stable>=2) {
+          q.phase='confirmed';pinned={a:q.a,b:q.b,interaction,scrollY};
+        }
+      }
+    }
+    return Object.assign(context(),g,{id:q.id,phase:q.phase,reason:q.reason || null,start:q.a,end:q.b,
+      layoutStable:q.stable>=2,elapsedMs:now-q.began});
+  }
+  window.JJ = {text: chars.join(''), selection, visible, anchor, go, context, viewport, beginSelection, takeSelection, resolveDom,
+    requestRestore, restoreStatus, cancelRestore, geometry};
 })();
