@@ -48,6 +48,13 @@ class ReaderPositionTest {
             else -> error("Unexpected bridge call")
         }
     }
+    @Test fun returnPlaceUsesOriginalCoordinatesAndRejectsMismatchedBook()=runTest {
+        val data=JSONObject();val port=Port();val reader=ReaderSession(book,data,{},port)
+        val previous=anchor(0,90);reader.navigateTo(previous);reader.navigateTo(anchor(1,160))
+        reader.restorePlace(previous);assertTrue(reader.ready);assertEquals(0,port.index);assertEquals(90,data.getJSONObject("positionV2").getInt("start"))
+        try{reader.restorePlace(JSONObject(previous.toString()).put("bookId","different"));fail("Wrong book")}catch(_:IllegalStateException){}
+        assertEquals(ReaderSession.Phase.RECOVERING,reader.phase)
+    }
     @Test fun repeatedCrossResourceJumpsSurviveImmediateAndDelayedRecreationWithoutViewportAnchor() = runTest {
         for (wait in listOf(0L,2500L)) {
             var durable=JSONObject();var data=JSONObject();var port=Port()

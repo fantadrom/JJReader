@@ -17,6 +17,7 @@
         android:theme="@style/Theme.JJReader">
         <activity
             android:name=".MainActivity"
+            android:configChanges="uiMode"
             android:exported="true"
             android:theme="@style/Theme.JJReader"
             android:windowSoftInputMode="adjustResize">

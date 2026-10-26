@@ -32,6 +32,8 @@ class SpeechDiagnostics(private val persist: (String) -> Unit = {}) {
             close?.let { row.put("webSocketCloseCode", it); publish() }
             return
         }
+        // A callback may have captured Attempt.stage before playback completed on another thread.
+        if(close!=null && code==null){row.put("webSocketCloseCode",close);publish();return}
         // Late WebSocket close carries metadata only; never moves a terminal stage backwards.
         if (close == null || code != null) row.put("stage", stage)
         if (stage == "cache" && source == "cache") row.put("networkAttempt", 0).put("synthesis", "cached")

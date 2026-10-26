@@ -11,18 +11,23 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /** Android audio/focus and bounded cache for SpeechQueue. No background service or WakeLock. */
-class PhrasePlayer(context: Context, private val scope: CoroutineScope,
+class PhrasePlayer(private val context: Context, private val scope: CoroutineScope,
                    onPhrase: suspend (Phrase?) -> Unit, private val status: (String) -> Unit, private val localAudio:((Phrase)->File?)?=null) {
     private val edge = EdgeClient()
     private val alternativeEdge = EdgeClient(route=EdgeRoute.READEST)
-    private val directory = File(context.cacheDir, "tts-p0").apply { mkdirs() }
+    private var directory = File(context.cacheDir, "tts-p0").apply { mkdirs() }
     private val diagnosticFile = File(context.filesDir, "tts-last-attempt.json")
     private val diagnostics = SpeechDiagnostics { json ->
         try { synchronized(diagnosticFile.absolutePath.intern()) { BookStore.writeAtomic(diagnosticFile, org.json.JSONObject(json)) } } catch (_: Exception) { }
     }
-    private val cache = PhraseAudioCache(directory, onRetry = { number ->
+    private fun makeCache() = PhraseAudioCache(directory, onRetry = { number ->
         withContext(Dispatchers.Main) { ensureActive(); status("Повтор подключения $number/3") }
     }) { text, voice, attempt -> edge.synthesize(text, voice, attempt) }
+    private var cache=makeCache()
+    fun bindBook(id:String){
+        require(java.util.UUID.fromString(id).toString()==id)
+        reset();directory=File(context.cacheDir,"tts-p1/$id").apply{mkdirs()};cache=makeCache()
+    }
     private val manager = context.getSystemService(AudioManager::class.java)
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attributes)

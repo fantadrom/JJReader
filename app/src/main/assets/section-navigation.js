@@ -2,6 +2,7 @@
 (function(){
  if(!window.JJ || JJ.enableSections)return;
  let enabled=false,tail=null,last=null,queued=null,touch=null,busy=false,visual=null,layoutSample=null,lastScroll=-Infinity;
+ let controls=false,readerAction=null,gesture=0;
  const context=JJ.context;
  const selection=()=>{const s=getSelection();return !!(s && !s.isCollapsed)};
  const blocked=e=>e instanceof Element && !!e.closest('a,button,input,textarea,[id^="r2-decoration-"],[data-jj-technical]');
@@ -38,20 +39,39 @@
    new ResizeObserver(schedule).observe(document.body);setInterval(()=>{layoutSample=`${innerWidth}:${innerHeight}:${scrollY}`},40);size();
    document.addEventListener('scroll',()=>{lastScroll=performance.now()},{passive:true});
    document.addEventListener('touchstart',event=>{
-     queued=null;touch=null;
-     if(busy || event.touches.length!==1 || selection() || blocked(event.target) || performance.now()-lastScroll<120)return;
-     const p=event.touches[0];touch={x:p.clientX,y:p.clientY,time:performance.now(),...edgeState()};
-   },{passive:true});
-   document.addEventListener('touchmove',event=>{if(event.touches.length!==1 || selection())touch=null},{passive:true});
-   document.addEventListener('touchcancel',()=>{touch=null},{passive:true});
+     queued=null;readerAction=null;touch=null;JJ.cancelUiContact?.();
+     if(busy || event.touches.length!==1 || selection() || blocked(event.target))return;
+     if(controls)JJ.beginUiContact?.();
+     const p=event.touches[0];touch={x:p.clientX,y:p.clientY,time:performance.now(),gesture:String(++gesture),left:controls&&p.clientX<innerWidth*.1,bright:false,dy:0,edgeEligible:performance.now()-lastScroll>=120,...edgeState()};
+   },{passive:true,capture:true});
+   document.addEventListener('touchmove',event=>{
+     if(!touch)return;
+     if(event.touches.length!==1 || selection()){touch=null;return}
+     if(touch.left){
+       if(performance.now()-touch.time>500&&!touch.bright){touch=null;return}
+       const p=event.touches[0],dy=p.clientY-touch.y,dx=p.clientX-touch.x;touch.dy=dy;
+       if(Math.abs(dx)>12 && Math.abs(dx)>Math.abs(dy)*1.5){touch=null;return}
+       // Reserve the left strip from the first movement; long press itself is untouched.
+       if(event.cancelable)event.preventDefault();
+       if(Math.abs(dy)>=12){JJ.commitUiContact?.();touch.bright=true;readerAction={...context(),kind:'brightness',gesture:touch.gesture,delta:-dy/innerHeight,end:false}}
+     }
+   },{passive:false,capture:true});
+   document.addEventListener('touchcancel',()=>{if(touch?.bright)readerAction={...context(),kind:'brightness',gesture:touch.gesture,delta:-touch.dy/innerHeight,end:true};touch=null},{passive:true,capture:true});
    document.addEventListener('touchend',event=>{
      const start=touch;touch=null;
-     if(!start || selection() || busy || event.changedTouches.length!==1 || performance.now()-start.time>650)return;
-     const p=event.changedTouches[0],dy=p.clientY-start.y,dx=p.clientX-start.x;
-     if(Math.abs(dy)<48 || Math.abs(dy)<Math.abs(dx)*1.5)return;
+     if(!start || selection() || busy || event.changedTouches.length!==1)return;
+     const elapsed=performance.now()-start.time,p=event.changedTouches[0],dy=p.clientY-start.y,dx=p.clientX-start.x;
+     if(start.left && (start.bright || Math.abs(dy)>=12&&elapsed<650)){
+       if(event.cancelable)event.preventDefault();JJ.commitUiContact?.();readerAction={...context(),kind:'brightness',gesture:start.gesture,delta:-dy/innerHeight,end:true};return;
+     }
+     if(controls && elapsed<350 && Math.abs(dy)<8 && Math.abs(dx)<8){
+       if(event.cancelable)event.preventDefault();JJ.commitUiContact?.();readerAction={...context(),kind:start.x>=innerWidth/3&&start.x<innerWidth*2/3?'panels':'page',direction:start.x<innerWidth/3?-1:1};return;
+     }
+     JJ.cancelUiContact?.();
+     if(start.left || !start.edgeEligible || elapsed>650 || Math.abs(dy)<48 || Math.abs(dy)<Math.abs(dx)*1.5)return;
      const direction=dy<0 && start.atEnd?'next':dy>0 && start.atStart?'previous':null;
      if(direction){busy=true;queued={...context(),direction}}
-   },{passive:true});return context();
+   },{passive:false,capture:true});return context();
  }
  function requestVisualRestore(id,end){size();if(end!==null)scrollTo(0,end?maxScroll():0);visual={id,end,documentId:context().documentId,sample:null,time:performance.now()};return true}
  function visualStatus(){
@@ -63,8 +83,15 @@
  }
  JJ.enableSections=enableSections;
  JJ.takeEdge=()=>{const result=queued;queued=null;if(!result)busy=false;return result};
- JJ.blockEdges=()=>{busy=true;queued=null;touch=null;return {ok:true}};
+ JJ.blockEdges=()=>{busy=true;queued=null;touch=null;readerAction=null;return {ok:true}};
  JJ.edgeComplete=()=>{busy=false;touch=null;queued=null;return {ok:true}};
+ JJ.configureInteractions=value=>{controls=!!value;return {ok:true}};
+ JJ.takeReaderAction=()=>{const result=readerAction;readerAction=null;if(result)return result;const edge=JJ.takeEdge();return edge?{...edge,kind:'edge',direction:edge.direction==='next'?1:-1}:null};
+ JJ.pageStep=direction=>{
+   const state=edgeState();if(direction>0&&state.atEnd || direction<0&&state.atStart)return {resource:direction};
+   const style=getComputedStyle(document.querySelector('p')||document.body),line=parseFloat(style.lineHeight)||parseFloat(style.fontSize)*1.4;
+   document.dispatchEvent(new Event('wheel'));scrollBy(0,direction*Math.max(1,innerHeight-line));return {resource:0};
+ };
  JJ.contentState=()=>({...context(),...edgeState(),lastMedia:!!last?.media,scrollY,maxScroll:maxScroll()});
  JJ.requestVisualRestore=requestVisualRestore;JJ.visualStatus=visualStatus;
  // Blank space after an illustration keeps a source-local visual position, never a fake quote.

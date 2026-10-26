@@ -13,13 +13,14 @@ import java.io.InputStream
 import java.util.UUID
 import java.util.zip.ZipFile
 
+/** Source reading-order resource; it is not necessarily a logical TOC chapter (P2). */
 data class Chapter(val href: String, val title: String, val text: String)
 data class Book(val id: String, val title: String, val file: File, val chapters: List<Chapter>) {
     val total = chapters.sumOf { TextModel.length(it.text) }
     fun offset(index: Int) = chapters.take(index).sumOf { TextModel.length(it.text) }
 }
 
-data class BookEntry(val id:String,val title:String,val notes:Int,val current:Boolean,val available:Boolean)
+data class BookEntry(val id:String,val title:String,val notes:Int,val current:Boolean,val available:Boolean,val sourceName:String?=null,val importedAt:Long=0,val progress:Int?=null,val savedPlace:Boolean=false)
 
 class BookStore(private val context: Context) {
     private val root = File(context.filesDir, "books-v1").apply { mkdirs() }
@@ -43,14 +44,14 @@ class BookStore(private val context: Context) {
             return stage
         } catch (e: Exception) { stage.delete(); throw e }
     }
-    fun commit(stage: File, title: String, chapters: List<Chapter>): Book {
+    fun commit(stage: File, title: String, chapters: List<Chapter>,sourceName:String?=null): Book {
         val id = UUID.randomUUID().toString()
         val dir = File(root, id).apply { check(mkdir()) }
         try {
             val file = File(dir, "book.epub")
             check(stage.renameTo(file))
             val meta = JSONObject().put("schema", 1).put("id", id).put("title", title)
-                .put("sha256", sha256(file))
+                .put("sha256", sha256(file)).put("importedAt",System.currentTimeMillis()).put("sourceName",sourceName ?: JSONObject.NULL)
                 .put("chapters", JSONArray(chapters.map { JSONObject().put("href", it.href).put("title", it.title).put("text", it.text) }))
             writeAtomic(File(dir, "book.json"), meta)
 
@@ -65,7 +66,7 @@ class BookStore(private val context: Context) {
     }
     fun current(): Book? {
         val current = File(root, "current.json")
-        if (!current.exists()) return null
+        if (!current.exists() && !File(current.path+".bak").exists()) return null
         val id = readAtomic(current).getString("id")
         require(UUID.fromString(id).toString() == id)
         return open(id)
@@ -84,24 +85,46 @@ class BookStore(private val context: Context) {
     fun entries():List<BookEntry> {
         val current=runCatching{readAtomic(File(root,"current.json")).getString("id")}.getOrNull()
         return root.listFiles().orEmpty().filter{it.isDirectory && runCatching{UUID.fromString(it.name).toString()==it.name && it.canonicalFile.parentFile==root.canonicalFile}.getOrDefault(false)}.map{dir->
-            var title="Недоступная копия";var count=0
+            var title="Недоступная копия";var count=0;var sourceName:String?=null;var importedAt=File(dir,"book.epub").lastModified();var progress:Int?=null;var savedPlace=false
             val valid=runCatching {
                 var schema=0;var titleFound=false;var chaptersFound=false
                 JsonReader(AtomicFile(File(dir,"book.json")).openRead().reader()).use{r->r.beginObject();while(r.hasNext())when(r.nextName()){
-                    "title"->{check(r.peek()==android.util.JsonToken.STRING);title=r.nextString();titleFound=true};"schema"->schema=r.nextInt();"chapters"->{check(r.peek()==android.util.JsonToken.BEGIN_ARRAY);r.skipValue();chaptersFound=true};else->r.skipValue()
+                    "title"->{check(r.peek()==android.util.JsonToken.STRING);title=r.nextString();titleFound=true};"sourceName"->{if(r.peek()==android.util.JsonToken.NULL)r.nextNull()else sourceName=r.nextString()};"importedAt"->importedAt=r.nextLong();"schema"->schema=r.nextInt();"chapters"->{check(r.peek()==android.util.JsonToken.BEGIN_ARRAY);r.skipValue();chaptersFound=true};else->r.skipValue()
                 };r.endObject()};check(schema==1 && titleFound && chaptersFound);check(File(dir,"book.epub").isFile)
                 val reader=File(dir,"reader.json")
                 if(reader.exists() || File(dir,"reader.json.bak").exists())JsonReader(AtomicFile(reader).openRead().reader()).use{r->
-                    var readerSchema=0;r.beginObject();while(r.hasNext())when(r.nextName()){ "schema"->readerSchema=r.nextInt();"notes"->{r.beginArray();while(r.hasNext()){r.skipValue();count++};r.endArray()};else->r.skipValue()};r.endObject();check(readerSchema==1)
+                    var readerSchema=0;r.beginObject();while(r.hasNext())when(r.nextName()){ "progress"->progress=r.nextInt().coerceIn(0,100);"positionV2","visualPosition"->{savedPlace=true;r.skipValue()};"schema"->readerSchema=r.nextInt();"notes"->{r.beginArray();while(r.hasNext()){r.skipValue();count++};r.endArray()};else->r.skipValue()};r.endObject();check(readerSchema==1)
                 }
             }.isSuccess
-            BookEntry(dir.name,title,count,dir.name==current,valid)
+            BookEntry(dir.name,title,count,dir.name==current,valid,sourceName,importedAt,progress,savedPlace)
         }.sortedWith(compareByDescending<BookEntry>{it.current}.thenBy{it.title}.thenBy{it.id})
     }
     /** Verify original bytes even for old records with stale/missing metadata hash. No data migration. */
     fun identical(stage:File):List<BookEntry> {
         val hash=sha256(stage)
         return entries().filter{it.available && runCatching{val file=File(root,"${it.id}/book.epub");validateZip(file);sha256(file)==hash}.getOrDefault(false)}
+    }
+    fun clearNotes(id:String) {
+        require(UUID.fromString(id).toString()==id)
+        val file=File(root,"$id/reader.json")
+        if(!file.exists() && !File(file.path+".bak").exists())return
+        val data=readAtomic(file);check(data.getInt("schema")==1)
+        data.put("notes",JSONArray());data.remove("draft");writeAtomic(file,data)
+    }
+    /** Caller confirms deletion and releases the active reader before entering this transaction. */
+    fun delete(id:String):Boolean {
+        require(UUID.fromString(id).toString()==id)
+        val directory=File(root,id);check(directory.canonicalFile.parentFile==root.canonicalFile)
+        val tombstone=File(root,".deleted-$id-${UUID.randomUUID()}")
+        if(directory.exists())check(directory.renameTo(tombstone)){"Не удалось удалить внутреннюю копию"}
+        val pointer=File(root,"current.json")
+        if(runCatching{readAtomic(pointer).getString("id")==id}.getOrDefault(false))AtomicFile(pointer).delete()
+        val removed=tombstone.deleteRecursively()
+        val derived=File(context.filesDir,"renditions-v1/$id").deleteRecursively()
+        val audio=File(context.cacheDir,"tts-p1/$id").deleteRecursively()
+        // Pre-P1 cache was shared (at most 12 MP3), with no book ownership metadata.
+        File(context.cacheDir,"tts-p0").deleteRecursively()
+        return removed && derived && audio
     }
     companion object {
         fun sha256(file:File):String {

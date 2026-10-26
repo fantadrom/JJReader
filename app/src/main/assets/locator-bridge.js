@@ -12,7 +12,7 @@
   const excluded = new Set('script style nav noscript iframe object svg math template'.split(' '));
   const chars = [], points = [];
   let selectionSession = null, selectionCache = null, restoreResult = null;
-  let pinned=null,viewportSample=null;
+  let pinned=null,viewportSample=null,uiPin=null;
   function sep() {
     while (chars[chars.length - 1] === ' ') { chars.pop(); points.pop(); }
     if (chars.length && chars[chars.length - 1] !== '\n') { chars.push('\n', '\n'); points.push(null, null); }
@@ -168,6 +168,10 @@
     if(expectedNavigation!==null && expectedNavigation!==navigationSerial)return false;
     pinned=null;restoreResult=null;return scrollTarget(a,b);
   }
+  // A chrome/brightness contact must not turn a confirmed mid-line point into line start.
+  function beginUiContact(){uiPin=pinned && Math.abs(scrollY-pinned.scrollY)<1 && geometry(pinned.a,pinned.b).shown?{...pinned}:null;return {ok:!!uiPin}}
+  function commitUiContact(){if(uiPin && Math.abs(scrollY-uiPin.scrollY)<1 && geometry(uiPin.a,uiPin.b).shown)pinned={...uiPin,interaction};uiPin=null;return {ok:true}}
+  function cancelUiContact(){uiPin=null;return {ok:true}}
   function viewport() {
     const v=visible(), now=performance.now();
     const key=[innerWidth,innerHeight,scrollY,document.documentElement.scrollHeight].join(':');
@@ -227,7 +231,7 @@
     return resolveDom(copy);
   }
   return {text: chars.join(''),selection,visible,anchor,go,context,viewport,beginSelection,takeSelection,resolveDom,resolveSourceDom,
-    requestRestore,restoreStatus,cancelRestore,geometry,fromRange,anchorForId};
+    requestRestore,restoreStatus,cancelRestore,geometry,fromRange,anchorForId,beginUiContact,commitUiContact,cancelUiContact};
   }
   if(!wrappers.length) {window.JJ=makeIndex(document.body,null);return;}
   const indexes=new Map();let active=0,session=null,cached=null,rootPin=null;

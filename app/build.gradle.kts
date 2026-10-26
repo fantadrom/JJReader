@@ -13,8 +13,8 @@ android {
         applicationId = "com.fantadrom.jjreader"
         minSdk = 31
         targetSdk = 37
-        versionCode = 10
-        versionName = "0.1.9-p0"
+        versionCode = 11
+        versionName = "0.2.0-p1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -43,6 +43,7 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions.unitTests.isIncludeAndroidResources = true
     testOptions.unitTests.all {
         // Readium's real injector uses android.net.Uri. Robolectric supplies that API;
         // downloaded JVM Android artifacts stay inside the ignored workspace directory.

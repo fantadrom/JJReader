@@ -258,6 +258,17 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             if(!ready)throw RestoreFailure(lastRestoreCode ?: code(e,"navigate"))
         }
     }
+    suspend fun restorePlace(place:JSONObject,operation:Long=freeze(ReadingTrace.Source.RESTORE)) {
+        try {
+        if(place.optString("kind")=="visual") {
+            check(place.optString("bookId",book.id)==book.id){"ANCHOR_BOOK"}
+            restoreVisual(place.getInt("chapter"),place.optBoolean("end"),operation,place.optJSONObject("locator")?.let(Locator::fromJSON))
+        } else {
+            val index=place.getInt("chapter");validate(place,index)
+            check(port.goResource(index));afterAwait(operation);restore(place,index,operation)
+        }
+        }catch(e:Exception){if(revision==operation){phase=Phase.RECOVERING;lastRestoreCode=code(e,"restore");emit(ReadingTrace.Event.REJECT,failure=lastRestoreCode)};throw e}
+    }
     suspend fun navigateBoundary(index:Int,end:Boolean,from:ReadingTrace.Source) {
         require(index in book.chapters.indices)
         val length=TextModel.length(book.chapters[index].text)

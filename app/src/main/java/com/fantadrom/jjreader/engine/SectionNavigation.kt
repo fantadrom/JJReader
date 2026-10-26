@@ -11,7 +11,7 @@ import java.io.File
 
 /** One owner for explicit navigation, including the queue-owned TTS transition. No pixel persistence. */
 class SectionNavigation(private val reader:ReaderSession,private val file:File,private val edges:suspend(Boolean)->Unit={}) {
-    enum class Initiator { GESTURE, BUTTON, TOC, NOTE, LINK, TTS }
+    enum class Initiator { GESTURE, BUTTON, TOC, NOTE, LINK, TTS, SLIDER, RETURN, TAP }
     private val mutex=Mutex()
     var busy=false;private set
     suspend fun run(initiator:Initiator,target:Int,end:Boolean=false,block:suspend()->Unit)=mutex.withLock {
@@ -24,7 +24,7 @@ class SectionNavigation(private val reader:ReaderSession,private val file:File,p
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable){kotlinx.coroutines.withTimeoutOrNull(500){runCatching{edges(false)}}}
             busy=false
             val root=runCatching{BookStore.readAtomic(file)}.getOrElse{JSONObject().put("schema",1).put("events",JSONArray())}
-            val rows=root.getJSONArray("events");rows.put(JSONObject().put("session",reader.id).put("book",com.fantadrom.jjreader.text.TextModel.hash(reader.book.id.toByteArray()).take(16)).put("initiator",initiator.name).put("from",origin).put("target",target).put("entry",if(initiator in setOf(Initiator.NOTE,Initiator.TOC,Initiator.LINK))"locator"else if(end)"end"else"start").put("revision",reader.currentRevision).put("outcome",outcome).put("ack",outcome=="success").put("durationMs",(System.nanoTime()-start)/1_000_000).put("errorCode",error))
+            val rows=root.getJSONArray("events");rows.put(JSONObject().put("session",reader.id).put("book",com.fantadrom.jjreader.text.TextModel.hash(reader.book.id.toByteArray()).take(16)).put("initiator",initiator.name).put("from",origin).put("target",target).put("entry",if(initiator in setOf(Initiator.NOTE,Initiator.TOC,Initiator.LINK,Initiator.SLIDER,Initiator.RETURN))"locator"else if(end)"end"else"start").put("revision",reader.currentRevision).put("outcome",outcome).put("ack",outcome=="success").put("durationMs",(System.nanoTime()-start)/1_000_000).put("errorCode",error))
             while(rows.length()>80)rows.remove(0);BookStore.writeAtomic(file,root)
         }
     }
