@@ -1,0 +1,15 @@
+EdgeToken.java is a Java adaptation of the Sec-MS-GEC v2 digest implementation from:
+https://github.com/rany2/edge-tts/blob/bd44c1d1aaebdc1db7f47456ee12431b42ec7cac/src/edge_tts/drm.py
+Copyright (c) rany <rany@riseup.net> and upstream contributors.
+Java adaptation: JJReader contributors, 2026.
+License: LGPL-3.0-or-later. See LICENSE (upstream combined notice) and COPYING (GPL v3).
+Changes: Java int overflow/rotate operations, generic SHA rounds, fixed-epoch API;
+removed Python runtime, HTTP clock skew adjustment, caches and all Python dependencies.
+
+This isolated library is linked into the unminified debug APK. Its complete corresponding
+source is included in this repository and the P0 source archive. You may modify/replace
+the library and rebuild/relink the APK with the included Gradle Wrapper. See README.md
+and docs/THIRD_PARTY.md for relinking and debugging instructions.
+
+The public CLIENT value is a protocol identifier published by upstream, not a private key
+or an Azure subscription. Microsoft service availability is not guaranteed by this library.

@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "scripts": {"test": "node verify_dom.cjs"},
+  "devDependencies": {"jsdom": "26.1.0", "playwright-core": "1.62.1"}
+}

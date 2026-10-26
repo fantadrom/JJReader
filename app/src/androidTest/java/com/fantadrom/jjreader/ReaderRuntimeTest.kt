@@ -1,0 +1,324 @@
+@file:OptIn(org.readium.r2.shared.ExperimentalReadiumApi::class)
+package com.fantadrom.jjreader
+
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.os.Process
+import android.os.SystemClock
+import android.view.MotionEvent
+import androidx.test.core.app.ActivityScenario
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.*
+import androidx.test.espresso.matcher.ViewMatchers.*
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import com.fantadrom.jjreader.books.BookStore
+import com.fantadrom.jjreader.engine.LocatorBridge
+import com.fantadrom.jjreader.engine.ReaderDecorations
+import com.fantadrom.jjreader.engine.RestoreCode
+import com.fantadrom.jjreader.engine.RestoreFailure
+import com.fantadrom.jjreader.engine.ReaderSession
+import com.fantadrom.jjreader.notes.NoteStore
+import com.fantadrom.jjreader.regression.ReaderRuntimeActivity
+import kotlinx.coroutines.*
+import org.json.JSONObject
+import org.hamcrest.Matchers.containsString
+import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.readium.r2.navigator.Decoration
+import org.readium.r2.navigator.epub.EpubNavigatorFragment
+import java.io.File
+import java.util.UUID
+
+@RunWith(AndroidJUnit4::class)
+class ReaderRuntimeTest {
+    private fun launch(token: String): ActivityScenario<ReaderRuntimeActivity> = ActivityScenario.launch(
+        Intent(InstrumentationRegistry.getInstrumentation().targetContext, ReaderRuntimeActivity::class.java).putExtra("testToken", token).putExtra("mode","sections"))
+    private fun activity(scenario: ActivityScenario<ReaderRuntimeActivity>): ReaderRuntimeActivity {
+        lateinit var result: ReaderRuntimeActivity; scenario.onActivity { result = it }; return result
+    }
+    private suspend fun ready(scenario: ActivityScenario<ReaderRuntimeActivity>): ReaderRuntimeActivity = withTimeout(15000) {
+        while (true) {
+            val a = activity(scenario)
+            if (withContext(Dispatchers.Main) { a.readerSessionForTests()?.ready == true }) return@withTimeout a
+            delay(100)
+        }
+        @Suppress("UNREACHABLE_CODE") error("READER_NOT_READY")
+    }
+    private fun nav(a: ReaderRuntimeActivity) = a.supportFragmentManager.findFragmentByTag("reader") as EpubNavigatorFragment
+    private fun state(a: ReaderRuntimeActivity) = NoteStore(a, checkNotNull(BookStore(a).current()).id).data
+    @Test fun portraitLandscapePortraitMeasuresNativeWebViewAndTextWidths() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click()); ready(scenario)
+            suspend fun orient(value: Int): JSONObject {
+                scenario.onActivity { it.requestedOrientation = value }
+                delay(1200)
+                val a = ready(scenario)
+                return withContext(Dispatchers.Main) {
+                    fun find(v: android.view.View): android.webkit.WebView? {
+                        if (v is android.webkit.WebView) return v
+                        if (v is android.view.ViewGroup) for (i in 0 until v.childCount) find(v.getChildAt(i))?.let { return it }
+                        return null
+                    }
+                    val web = checkNotNull(find(checkNotNull(nav(a).view)))
+                    val geometry = LocatorBridge(a).call(nav(a), "({innerWidth,root:document.documentElement.getBoundingClientRect().width,body:document.body.getBoundingClientRect().width,text:document.querySelector('p').getBoundingClientRect().width,maxWidth:getComputedStyle(document.body).maxWidth,padding:getComputedStyle(document.body).paddingLeft,columns:getComputedStyle(document.documentElement).columnCount})")!!
+                    geometry.put("webViewPx", web.width).put("containerPx", (web.parent as android.view.View).width)
+                    assertEquals(web.width.toDouble(), geometry.getDouble("innerWidth") * a.resources.displayMetrics.density, 4.0)
+                    assertEquals(geometry.getDouble("innerWidth") - 32, geometry.getDouble("text"), 4.0)
+                    android.util.Log.i("JJReaderLayout", geometry.toString())
+                    geometry
+                }
+            }
+            val portrait = orient(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+            val landscape = orient(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+            val back = orient(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+            assertTrue(landscape.getDouble("text") > portrait.getDouble("text") + 100)
+            assertEquals(portrait.getDouble("text"), back.getDouble("text"), 4.0)
+        }
+    }
+    @Test fun actualUiFontActionModeNotesRecreationAndVisibleUnderline() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click()); var a = ready(scenario)
+            val before = withContext(Dispatchers.Main) { LocatorBridge(a).call(nav(a), "JJ.context()")!!.getDouble("fontSize") }
+            repeat(3) { onView(withText("А+")).perform(click()) }
+            withTimeout(15000) { while (withContext(Dispatchers.Main) { LocatorBridge(a).call(nav(a), "JJ.context()")!!.getDouble("fontSize") } <= before * 1.2) delay(100) }
+            onView(withText("А−")).perform(click()); a = ready(scenario)
+            for ((paragraph, comment) in listOf("p1" to "первое", "p5" to "второе")) {
+                a = ready(scenario)
+                longPressWord(a, paragraph)
+                onView(withText("Пометка")).perform(click())
+                onView(withHint("Короткий комментарий")).perform(replaceText(comment), closeSoftKeyboard())
+                onView(withText("Сохранить")).perform(click())
+            }
+            val notes = withContext(Dispatchers.Main) { state(a).getJSONArray("notes") }
+            assertEquals(2, notes.length()); assertNotEquals(notes.getJSONObject(0).getInt("start"), notes.getJSONObject(1).getInt("start"))
+            a = ready(scenario)
+            longPressWord(a, "p1"); onView(withText("Пометка")).perform(click())
+            onView(withHint("Короткий комментарий")).perform(replaceText("черновик"), closeSoftKeyboard())
+            scenario.recreate()
+            withTimeout(15000) { while (!withContext(Dispatchers.Main) { activity(scenario).commentEditorVisibleForTests() }) delay(100) }
+            onView(withHint("Короткий комментарий")).check(matches(withText("черновик")))
+            onView(withText("Отменить")).perform(click()); a = ready(scenario)
+            val position = scrollAndSave(a)
+            scenario.recreate(); a = ready(scenario)
+            assertNearSavedText(a, position)
+            assertEquals(2, withContext(Dispatchers.Main) { state(a).getJSONArray("notes").length() })
+            val previousActivity = a
+            scenario.onActivity { it.requestedOrientation = if (it.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+            withTimeout(15000) { while (activity(scenario) === previousActivity) delay(100) }
+            a = ready(scenario); assertNearSavedText(a, position)
+            withContext(Dispatchers.Main) {
+                val bridge = LocatorBridge(a); val anchor = bridge.call(nav(a), "JJ.anchor(1500,1570)")!!
+                nav(a).applyDecorations(listOf(Decoration("test-tts", bridge.locator(nav(a).currentLocator.value, anchor), Decoration.Style.Underline(ReaderDecorations.BLUE))), "tts")
+            }
+            withTimeout(10000) {
+                while (!withContext(Dispatchers.Main) { LocatorBridge(a).call(nav(a), "({visible:Array.from(document.querySelectorAll('[id^=\"r2-decoration-\"] *')).some(e=>parseFloat(getComputedStyle(e).borderBottomWidth)>=3 && e.getBoundingClientRect().width>0 && getComputedStyle(e).borderBottomColor==='rgb(34, 103, 208)')})")!!.getBoolean("visible") }) delay(100)
+            }
+            withContext(Dispatchers.Main) { nav(a).applyDecorations(emptyList(), "tts") }
+        }
+    }
+    @Test fun noteX1RotateNoteX2RotateAndRecreateRepeatedWithImmediateAndDelayedRotation() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click()); var a=ready(scenario)
+            suspend fun addNote(paragraph:String,comment:String) {
+                longPressWord(a,paragraph);onView(withText("Пометка")).perform(click())
+                onView(withHint("Короткий комментарий")).perform(replaceText(comment),closeSoftKeyboard())
+                onView(withText("Сохранить")).perform(click());a=ready(scenario)
+            }
+            addNote("p1","x1")
+            onView(withText("Раздел →")).perform(click())
+            withTimeout(12000){while(withContext(Dispatchers.Main){a.readerSessionForTests()!!.chapterIndex()}!=1)delay(32)}
+            withContext(Dispatchers.Main){a.readerSessionForTests()!!.context(1)}
+            addNote("p2","x2")
+            suspend fun assertChapter(index:Int) {
+                a=ready(scenario)
+                withContext(Dispatchers.Main){
+                    assertEquals(index,a.readerSessionForTests()!!.chapterIndex())
+                    a.readerSessionForTests()!!.context(index)
+                    assertEquals(a.readingTraceForTests().toString(),index,state(a).getJSONObject("positionV2").getInt("chapter"))
+                }
+            }
+            suspend fun jump(index:Int) {
+                onView(withText("Пометки · 2")).perform(click())
+                onView(withText(containsString(" — x${index+1}"))).perform(click())
+                withTimeout(12000){while(withContext(Dispatchers.Main){state(activity(scenario)).optJSONObject("positionV2")?.optInt("chapter")}!=index)delay(16)}
+                assertChapter(index)
+            }
+            suspend fun rotate(index:Int) {
+                val old=activity(scenario)
+                scenario.onActivity{it.requestedOrientation=if(it.resources.configuration.orientation==Configuration.ORIENTATION_PORTRAIT)ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT}
+                withTimeout(15000){while(activity(scenario)===old)delay(32)}
+                assertChapter(index)
+            }
+            for(wait in listOf(0L,2500L))repeat(2){
+                jump(0);delay(wait);rotate(0)
+                jump(1);delay(wait);rotate(1)
+                scenario.recreate();assertChapter(1)
+                assertEquals(2,withContext(Dispatchers.Main){state(a).getJSONArray("notes").length()})
+            }
+        }
+    }
+    @Test fun landscapeSwipeAcrossThreeRealResourcesRetainsWidth() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());ready(scenario)
+            scenario.onActivity{it.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE}
+            delay(1200);ready(scenario)
+            suspend fun checkResource(index:Int) {
+                withTimeout(15000){while(withContext(Dispatchers.Main){activity(scenario).readerSessionForTests()!!.chapterIndex()}!=index)delay(32)}
+                val a=ready(scenario)
+                withContext(Dispatchers.Main){
+                    // Read raw native JS: this assertion must not install the bridge/style itself.
+                    val raw=nav(a).evaluateJavascript("JSON.stringify({url:location.pathname,width:innerWidth,text:document.querySelector('p').getBoundingClientRect().width,styles:document.querySelectorAll('style#jj-reader-width').length,maxWidth:getComputedStyle(document.body).maxWidth})")!!
+                    val decoded=if(raw.startsWith('"'))org.json.JSONTokener(raw).nextValue() as String else raw
+                    val geometry=JSONObject(decoded)
+                    assertTrue(geometry.getString("url").endsWith("c${index+1}.xhtml"))
+                    assertEquals(1,geometry.getInt("styles"));assertEquals("none",geometry.getString("maxWidth"))
+                    assertEquals(geometry.getDouble("width")-32,geometry.getDouble("text"),4.0)
+                }
+            }
+            checkResource(0)
+            for(index in listOf(1,2)){onView(withText("Раздел →")).perform(click());checkResource(index)}
+            for(index in listOf(1,0)){onView(withText("← Раздел")).perform(click());checkResource(index)}
+            onView(withText("А+")).perform(click());checkResource(0)
+            scenario.recreate();checkResource(0)
+        }
+    }
+    @Test fun crossResourceProcessRestartProbe() = runBlocking {
+        val phase=InstrumentationRegistry.getArguments().getString("p05ProcessPhase")
+        assumeTrue("Run paired phases with android_process_restart.ps1 -CrossResource",phase in listOf("prepare","verify"))
+        launch("process-p05").use { scenario ->
+            if(phase=="prepare") {
+                onView(withText("Пример P0")).perform(click());var a=ready(scenario)
+                suspend fun add(paragraph:String,comment:String){
+                    longPressWord(a,paragraph);onView(withText("Пометка")).perform(click())
+                    onView(withHint("Короткий комментарий")).perform(replaceText(comment),closeSoftKeyboard())
+                    onView(withText("Сохранить")).perform(click());a=ready(scenario)
+                }
+                add("p1","restart-x1");onView(withText("Раздел →")).perform(click())
+                withTimeout(12000){while(withContext(Dispatchers.Main){a.readerSessionForTests()!!.chapterIndex()}!=1)delay(32)}
+                withContext(Dispatchers.Main){a.readerSessionForTests()!!.context(1)};add("p2","restart-x2")
+                for(index in listOf(0,1)){
+                    onView(withText("Пометки · 2")).perform(click());onView(withText(containsString(" — restart-x${index+1}"))).perform(click())
+                    withTimeout(12000){while(withContext(Dispatchers.Main){state(a).getJSONObject("positionV2").getInt("chapter")}!=index)delay(16)}
+                }
+                BookStore.writeAtomic(File(a.filesDir,"process-p05-expected.json"),JSONObject().put("pid",Process.myPid()).put("chapter",1))
+            }else{
+                val a=ready(scenario);val saved=BookStore.readAtomic(File(a.filesDir,"process-p05-expected.json"))
+                assertNotEquals(saved.getInt("pid"),Process.myPid())
+                withContext(Dispatchers.Main){
+                    assertEquals(1,NoteStore(a,checkNotNull(BookStore(a).current()).id).data.getJSONObject("positionV2").getInt("chapter"))
+                    assertEquals(1,a.readerSessionForTests()!!.chapterIndex());a.readerSessionForTests()!!.context(1)
+                }
+            }
+        }
+    }
+    @Test fun realWebViewAcceptedRestoreWithFailedAckRecoversSecondResourceAndRecreatesThere() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());val a=ready(scenario)
+            withContext(Dispatchers.Main) {
+                val reader=checkNotNull(a.readerSessionForTests());val op=reader.freeze()
+                val locator=checkNotNull(org.readium.r2.shared.publication.Locator.fromJSON(JSONObject()
+                    .put("href",reader.book.chapters[1].href).put("type","application/xhtml+xml")))
+                assertTrue(nav(a).go(locator,animated=false));reader.context(1)
+                val bridge=LocatorBridge(a);val target=bridge.call(nav(a),"JJ.anchor(150,160)")!!.put("chapter",1)
+                // Force the exact accepted-request -> ANCHOR_NOT_VISIBLE check on the real document.
+                bridge.call(nav(a),"(function(){const original=JJ.restoreStatus;JJ.restoreStatus=()=>{const s=original();return s?Object.assign(s,{phase:'confirmed',shown:false}):s};return {ok:true};})()")
+                reader.restore(target,1,op)
+                assertEquals(RestoreCode.ANCHOR_NOT_VISIBLE,reader.lastRestoreCode);assertTrue(reader.ready)
+                assertEquals(1,NoteStore(a,reader.book.id).data.getJSONObject("positionV2").getInt("chapter"))
+            }
+            scenario.recreate();val next=ready(scenario)
+            withContext(Dispatchers.Main){
+                assertEquals(1,next.readerSessionForTests()!!.chapterIndex());next.readerSessionForTests()!!.context(1)
+                assertEquals(1,state(next).getJSONObject("positionV2").getInt("chapter"))
+                val report=next.readingTraceForTests().toString();assertTrue(report.contains("ANCHOR_NOT_VISIBLE"));assertTrue(report.contains("RECOVERY"))
+            }
+        }
+    }
+    @Test fun realInitialAckFailureDoesNotDisableLaterCaptureInNextResource() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());val a=ready(scenario)
+            withContext(Dispatchers.Main){
+                val bridge=LocatorBridge(a)
+                bridge.call(nav(a),"(function(){const status=JJ.restoreStatus,viewport=JJ.viewport;JJ.restoreStatus=()=>{const s=status();return s?Object.assign(s,{phase:'failed',reason:'ANCHOR_NOT_VISIBLE',shown:false}):s};JJ.viewport=()=>Object.assign(viewport(),{layoutReady:false});return {ok:true};})()")
+                try{a.readerSessionForTests()!!.restoreInitial();fail()}catch(e:RestoreFailure){assertEquals(RestoreCode.ANCHOR_NOT_VISIBLE,e.code)}
+                assertEquals(ReaderSession.Phase.RECOVERING,a.readerSessionForTests()!!.phase)
+            }
+            onView(withText("Раздел →")).perform(click())
+            withTimeout(15000){while(withContext(Dispatchers.Main){!a.readerSessionForTests()!!.ready || state(a).optJSONObject("positionV2")?.optInt("chapter")!=1})delay(50)}
+            scenario.recreate();val next=ready(scenario)
+            withContext(Dispatchers.Main){assertEquals(1,next.readerSessionForTests()!!.chapterIndex());next.readerSessionForTests()!!.context(1)}
+        }
+    }
+    @Test fun actualLowWebViewViewportAcknowledgesFirstReadableGlyph() = runBlocking {
+        launch(UUID.randomUUID().toString()).use { scenario ->
+            onView(withText("Пример P0")).perform(click());val a=ready(scenario)
+            withContext(Dispatchers.Main){
+                val container=a.findViewById<android.view.View>(23001)
+                container.layoutParams=(container.layoutParams as android.widget.LinearLayout.LayoutParams).apply{weight=0f;height=(24*a.resources.displayMetrics.density).toInt()}
+                container.requestLayout()
+            }
+            val bridge=LocatorBridge(a)
+            withTimeout(12000){while(withContext(Dispatchers.Main){bridge.call(nav(a),"({height:innerHeight})")!!.getInt("height")} !in 1..40)delay(32)}
+            withContext(Dispatchers.Main){
+                val target=bridge.call(nav(a),"JJ.anchor(1500,1504)")!!.put("chapter",0)
+                a.readerSessionForTests()!!.restore(target)
+                val ack=bridge.call(nav(a),"JJ.restoreStatus()")!!
+                assertEquals("confirmed",ack.getString("phase"));assertTrue(ack.getBoolean("shown"));assertTrue(ack.getBoolean("layoutStable"))
+                assertTrue(ack.getJSONObject("firstRect").getDouble("top")<ack.getDouble("viewportHeight"))
+                try{bridge.call(nav(a),"(function(){throw new Error('PRIVATE');})()");fail()}catch(e:RestoreFailure){assertEquals(RestoreCode.JS_ERROR,e.code)}
+            }
+        }
+    }
+    private suspend fun longPressWord(a: ReaderRuntimeActivity, paragraph: String) {
+        // JS computes coordinates only. Selection is created by a genuine Android long-press.
+        val point = withContext(Dispatchers.Main) {
+            LocatorBridge(a).call(nav(a), """(function(){const n=document.getElementById('$paragraph').firstChild;const i=n.data.indexOf('маяк');
+                const r=document.createRange();r.setStart(n,i);r.setEnd(n,i+4);window.scrollBy(0,r.getBoundingClientRect().top-100);
+                const b=r.getBoundingClientRect();return {x:b.left+b.width/2,y:b.top+b.height/2};})()""")!!
+        }
+        val screen = IntArray(2)
+        val density = withContext(Dispatchers.Main) { nav(a).publicationView.getLocationOnScreen(screen); a.resources.displayMetrics.density }
+        val x = screen[0] + point.getDouble("x").toFloat() * density; val y = screen[1] + point.getDouble("y").toFloat() * density
+        val instrumentation = InstrumentationRegistry.getInstrumentation(); val began = SystemClock.uptimeMillis()
+        MotionEvent.obtain(began, began, MotionEvent.ACTION_DOWN, x, y, 0).also { instrumentation.sendPointerSync(it); it.recycle() }
+        delay(800)
+        MotionEvent.obtain(began, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0).also { instrumentation.sendPointerSync(it); it.recycle() }
+        instrumentation.waitForIdleSync()
+    }
+    private suspend fun scrollAndSave(a: ReaderRuntimeActivity): JSONObject {
+        withContext(Dispatchers.Main) { LocatorBridge(a).call(nav(a), "({ok:JJ.requestRestore('test-middle',1500,1504)})") }
+        return withTimeout(12000) {
+            while (true) {
+                withContext(Dispatchers.Main){LocatorBridge(a).call(nav(a),"JJ.restoreStatus()")}
+                val position = withContext(Dispatchers.Main) { state(a).optJSONObject("positionV2") }
+                if (position != null && position.getInt("start") > 1200) return@withTimeout JSONObject(position.toString())
+                delay(100)
+            }
+            @Suppress("UNREACHABLE_CODE") error("POSITION_NOT_SAVED")
+        }
+    }
+    private suspend fun assertNearSavedText(a: ReaderRuntimeActivity, expected: JSONObject) = withContext(Dispatchers.Main) {
+        val viewport = LocatorBridge(a).call(nav(a), "JJ.viewport()")!!
+        assertTrue(kotlin.math.abs(viewport.getInt("first") - expected.getInt("start")) < 150)
+        assertTrue(viewport.getInt("first") > 1000)
+    }
+    @Test fun processRestartProbe() = runBlocking {
+        val phase = InstrumentationRegistry.getArguments().getString("p02ProcessPhase")
+        assumeTrue("Run paired phases with tools/android_process_restart.ps1", phase in listOf("prepare", "verify"))
+        launch("process-p02").use { scenario ->
+            if (phase == "prepare") {
+                onView(withText("Пример P0")).perform(click()); val a = ready(scenario)
+                BookStore.writeAtomic(File(a.filesDir, "process-expected.json"), scrollAndSave(a).put("pid", Process.myPid()))
+            } else {
+                val a = ready(scenario); val expected = BookStore.readAtomic(File(a.filesDir, "process-expected.json"))
+                assertNotEquals("A new OS process is required", expected.getInt("pid"), Process.myPid())
+                assertNearSavedText(a, expected)
+            }
+        }
+    }
+}

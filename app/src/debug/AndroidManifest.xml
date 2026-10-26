@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Instrumentation-only host: no launcher/filter, no access from other apps. -->
+        <activity android:name=".regression.RenderRegressionActivity" android:exported="false" />
+        <activity android:name=".regression.ReaderRuntimeActivity" android:exported="false" />
+    </application>
+</manifest>

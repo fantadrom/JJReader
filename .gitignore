@@ -41,3 +41,5 @@ local.properties
 # Python verification caches
 __pycache__/
 *.py[cod]
+tools/node_modules/
+.local/
