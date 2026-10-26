@@ -20,8 +20,6 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
-import javax.xml.XMLConstants
-import javax.xml.parsers.DocumentBuilderFactory
 
 class UnifiedUnsupported(val category: String) : IllegalStateException("Единая лента недоступна: $category. Доступен прежний режим в диагностике.")
 data class UnifiedDocument(val file: File, val map: JSONObject, val cacheHit: Boolean, val prepareMs: Long) {
@@ -29,8 +27,9 @@ data class UnifiedDocument(val file: File, val map: JSONObject, val cacheHit: Bo
     companion object {
         const val VERSION="unified-v1";const val HREF="unified.xhtml"
         private val mutex=Mutex()
-        suspend fun prepare(book: Book, root: File, toc: List<Pair<String,String>>): UnifiedDocument = mutex.withLock {
+        suspend fun prepare(book: Book, root: File, toc: List<Pair<String,String>>, onStage:(OpeningAttempt.Stage)->Unit={}, onProvider:(String)->Unit={}): UnifiedDocument = mutex.withLock {
             require(UUID.fromString(book.id).toString()==book.id)
+            onStage(OpeningAttempt.Stage.CACHE_CHECK)
             val began=System.nanoTime();currentCoroutineContext().ensureActive()
             com.fantadrom.jjreader.books.BookStore.validateZip(book.file)
             val sourceHash=hashFile(book.file)
@@ -51,7 +50,9 @@ data class UnifiedDocument(val file: File, val map: JSONObject, val cacheHit: Bo
                 val generation=UUID.randomUUID().toString()
                 val builder=UnifiedBuilder(book)
                 ZipFile(book.file).use { zip ->
-                    builder.build(zip,toc,generation)
+                    onStage(OpeningAttempt.Stage.BUILD)
+                    builder.build(zip,toc,generation,onStage,onProvider)
+                    onStage(OpeningAttempt.Stage.BUILD)
                     currentCoroutineContext().ensureActive()
                     val out=File(stage,"rendition.epub")
                     out.outputStream().use { stream -> ZipOutputStream(stream).use { target ->
@@ -80,6 +81,7 @@ data class UnifiedDocument(val file: File, val map: JSONObject, val cacheHit: Bo
                 File(stage,"map.json").writeText(map.toString());java.io.RandomAccessFile(File(stage,"map.json"),"rw").use{it.fd.sync()}
                 File(stage,"ready.json").writeText(JSONObject().put("epubHash",hashFile(File(stage,"rendition.epub"))).put("mapHash",hashFile(File(stage,"map.json"))).toString())
                 java.io.RandomAccessFile(File(stage,"ready.json"),"rw").use{it.fd.sync()}
+                onStage(OpeningAttempt.Stage.CACHE_PUBLISH)
                 currentCoroutineContext().ensureActive();check(stage.renameTo(complete))
                 UnifiedDocument(File(complete,"rendition.epub"),map,false,(System.nanoTime()-began)/1_000_000)
             } finally {stage.deleteRecursively()}
@@ -109,7 +111,7 @@ internal class UnifiedBuilder(private val book:Book) {
         if(uri.path.substringAfterLast('.').lowercase() in setOf("xhtml","html","htm"))throw UnifiedUnsupported("ссылка на нелинейный HTML вне модели")
         return URI(null,null,"source/"+uri.path,uri.query,uri.fragment).toASCIIString()
     }
-    suspend fun build(zip:ZipFile,toc:List<Pair<String,String>>,generation:String) {
+    suspend fun build(zip:ZipFile,toc:List<Pair<String,String>>,generation:String,onStage:(OpeningAttempt.Stage)->Unit={},onProvider:(String)->Unit={}) {
         if(paths.distinct().size!=paths.size)throw UnifiedUnsupported("повторяющиеся readingOrder href неоднозначны для резервного режима")
         if(book.chapters.isEmpty())throw UnifiedUnsupported("нет линейных разделов")
         zip.entries().asSequence().filter{it.name.endsWith(".opf",true)}.forEach{opf->
@@ -165,7 +167,7 @@ internal class UnifiedBuilder(private val book:Book) {
         navigation="""<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol>$links</ol></nav></body></html>"""
         doc.outputSettings().prettyPrint(false).syntax(Document.OutputSettings.Syntax.xml).escapeMode(Entities.EscapeMode.xhtml)
         xhtml=SafeHtml.transform(doc.outerHtml(),"application/xhtml+xml")
-        val factory=DocumentBuilderFactory.newInstance().apply{isNamespaceAware=true;setFeature(XMLConstants.FEATURE_SECURE_PROCESSING,true);setFeature("http://apache.org/xml/features/disallow-doctype-decl",true)}
-        factory.newDocumentBuilder().parse(xhtml.byteInputStream())
+        onStage(OpeningAttempt.Stage.XML_VALIDATE)
+        AndroidXhtmlValidator.validate(xhtml,onProvider)
     }
 }

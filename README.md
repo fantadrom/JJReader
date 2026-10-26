@@ -1,10 +1,12 @@
-# JJReader · P0.7 / 0.1.7-p0 / code 8
+# JJReader · P0.7.1 / 0.1.8-p0 / code 9
+
+**P0.7.1:** устранены обязательные JAXP/Xerces setFeature в Android-подготовке: используется production namespace-aware XmlPullParser с запретом DTD/entities. В начало диагностики добавлена сохраняемая последняя попытка открытия со stage/code, классами исключений и XML-provider. [Отчёт P0.7.1](docs/P0_7_1_ANDROID_XML_REPORT.md). Honor code8 не открывал unified; code9 на Honor NOT_RUN.
 
 Android-прототип EPUB и Edge TTS. P0.7 добавляет единую вертикальную ленту через производный EPUB с одним XHTML в существующем стабильном Readium 3.4.0. Соседние исходные разделы находятся в одном DOM; отдельный горизонтальный переход не нужен. Исходная копия EPUB, UUID, модель v1 и сохранённые пометки остаются прежними. Общий адаптер переводит source-local координаты в DOM для пометок, позиции, процента и пятифразной озвучки через границу.
 
 В «Диагностика TTS» → «Проверки» доступны оглавление и переключение unified/legacy без переимпорта. Версия, режим, converter/generation и WebView показаны в диагностике. Межраздельная пометка отклоняется с объяснением. Для сложного неподдерживаемого EPUB предлагается прежний режим.
 
-**Проверка P0.7:** сборка, JVM, lint, строгий XML после Readium и desktop Chromium проходят. Большие синтетические фикстуры: 1 011 991 CP / 80 разделов и 3 025 092 CP / 200. На большей открытие Chromium заняло 3,4–4,6 с, reflow шрифта до 2,3 с; суммарный RSS renderer ~801 MiB (desktop, включая spare). Решение по пригодности подхода **требует Honor**; Android/Honor code8 NOT_RUN. Полный DOM не виртуализируется. [Архитектура, совместимость, ограничения, таблицы результатов и команды Windows](docs/P0_7_CONTINUOUS_READING_REPORT.md), [короткий чек-лист Honor](docs/HONOR_CHECKLIST.md).
+**Историческая desktop-проверка P0.7 (code8; не подтверждает Android-открытие):** сборка, JVM, lint, строгий XML после Readium и desktop Chromium проходят. Большие синтетические фикстуры: 1 011 991 CP / 80 разделов и 3 025 092 CP / 200. На большей открытие Chromium заняло 3,4–4,6 с, reflow шрифта до 2,3 с; суммарный RSS renderer ~801 MiB (desktop, включая spare). Решение по пригодности подхода **требует Honor**; Android/Honor code8 NOT_RUN. Полный DOM не виртуализируется. [Архитектура, совместимость, ограничения, таблицы результатов и команды Windows](docs/P0_7_CONTINUOUS_READING_REPORT.md), [короткий чек-лист Honor](docs/HONOR_CHECKLIST.md).
 
 Пользователь подтвердил на Honor ABR-LX1 / Android15 для **правильного code7** сохранение x2 после x1 → поворот → x2 → поворот, отсутствие накопительного дрейфа и полную ширину landscape. Ранее подтверждены шрифт, пометки, внутренняя копия и оба голоса/подсветка; Дмитрий иногда требовал повтора. Прежняя неуспешная трасса относилась к ошибочно запущенной старой версии. Эти подтверждения не заменяют проверку unified code8.
 
@@ -30,7 +32,7 @@ APK: `app\build\outputs\apk\debug\app-debug.apk`. Instrumentation APK: `app\buil
 
 ## Подпись и обновление без потери пометок
 
-`applicationId = com.fantadrom.jjreader`, `versionName = 0.1.7-p0`, `versionCode = 8`. Использован тот же debug-ключ среды, что для code 1–7. SHA-256 сертификата:
+`applicationId = com.fantadrom.jjreader`, `versionName = 0.1.8-p0`, `versionCode = 9`. Использован тот же debug-ключ среды, что для code 1–8. SHA-256 сертификата:
 
 `06ba3132107a954a4640ad60a29138b297449a6172bb763b8832293dc1c727ef`
 

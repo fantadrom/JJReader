@@ -43,6 +43,7 @@ open class MainActivity : AppCompatActivity() {
     private var publication: Publication? = null
     private var navigator: EpubNavigatorFragment? = null
     private var readerJob: Job? = null
+    private val openingAttempts by lazy { OpeningAttempt(java.io.File(filesDir,"opening-attempt-v1.json")) }
     private var openingJob: Job? = null
     private var decorationJob:Job?=null
     private var resizeJob: Job? = null
@@ -113,13 +114,14 @@ open class MainActivity : AppCompatActivity() {
     internal fun readingTraceForTests() = readingTrace.json()
     private fun buildMetadata():JSONObject {
         val info=packageManager.getPackageInfo(packageName,0)
+        val latest=openingAttempts.json().optJSONObject("latest")
         return JSONObject().put("versionName",info.versionName).put("versionCode",info.longVersionCode)
-            .put("mode",rendition?.mode ?: "preparing").put("converter",rendition?.unified?.map?.optString("converter") ?: "legacy")
-            .put("generation",rendition?.unified?.generation ?: "legacy").put("sourceModel",1).put("readingSchema",3)
+            .put("mode",latest?.optString("outcome")?.takeIf{it!="success"} ?: rendition?.mode ?: "idle").put("activeMode",rendition?.mode ?: JSONObject.NULL).put("converter",latest?.opt("converter") ?: JSONObject.NULL)
+            .put("generation",latest?.opt("generation") ?: JSONObject.NULL).put("sourceModel",1).put("readingSchema",3)
             .put("runtime","Android WebView").put("webView",android.webkit.WebView.getCurrentWebViewPackage()?.versionName ?: "unknown")
-            .put("prepareMs",lastPrepareMs).put("cacheHit",documentCacheHit).put("openMs",openMs)
+            .put("prepareMs",latest?.opt("prepareMs") ?: JSONObject.NULL).put("cacheHit",latest?.opt("cacheHit") ?: JSONObject.NULL).put("openMs",if(latest?.optString("outcome")=="success" && openMs>0)openMs else JSONObject.NULL)
     }
-    private fun combinedDiagnostics(): String = JSONObject().put("build",buildMetadata()).put("reader",readingTrace.json())
+    private fun combinedDiagnostics(): String = JSONObject().put("opening",openingAttempts.json()).put("build",buildMetadata()).put("reader",readingTrace.json())
         .put("tts",runCatching{JSONObject(player.diagnosticText())}.getOrElse{JSONObject().put("available",false)}).toString(2)
     private fun setUnified(enabled:Boolean) {
         getSharedPreferences("reader",MODE_PRIVATE).edit().putBoolean("unified",enabled).apply()
@@ -191,6 +193,10 @@ open class MainActivity : AppCompatActivity() {
     }
     private suspend fun load(value: Book) {
         openingJob=currentCoroutineContext()[Job]
+        val unifiedEnabled=getSharedPreferences("reader",MODE_PRIVATE).getBoolean("unified",true)
+        val info=packageManager.getPackageInfo(packageName,0)
+        val attempt=openingAttempts.begin(info.versionName ?: "unknown",info.longVersionCode,unifiedEnabled,rendition?.mode)
+        try {
         val newNotes = withContext(Dispatchers.IO) { NoteStore(this@MainActivity, value.id) }
         fun indexOf(href:String?) = value.chapters.indexOfFirst { it.href.substringBefore('#') == href?.substringBefore('#') }
         fun storeEvent(event:ReadingTrace.Event,source:ReadingTrace.Source,data:JSONObject,disk:JSONObject?) {
@@ -204,7 +210,6 @@ open class MainActivity : AppCompatActivity() {
         newNotes.onSaved = { source,data,disk -> storeEvent(ReadingTrace.Event.STORE_WRITE,ReadingTrace.Source.valueOf(source.name),data,disk) }
         storeEvent(ReadingTrace.Event.STORE_LOAD,ReadingTrace.Source.INITIAL,newNotes.data,newNotes.readDisk())
         val openBegan=System.nanoTime()
-        val unifiedEnabled=getSharedPreferences("reader",MODE_PRIVATE).getBoolean("unified",true)
         status.text=if(unifiedEnabled)"Подготовка единой ленты…"else"Открытие разделов…"
         val prepared: Pair<Publication,UnifiedDocument?>
         var pendingPublication:Publication?=null
@@ -215,19 +220,18 @@ open class MainActivity : AppCompatActivity() {
                 fun flatten(items:List<org.readium.r2.shared.publication.Link>):List<Pair<String,String>> = items.flatMap{listOf((it.title ?: "Раздел") to it.url().toString())+flatten(it.children)}
                 preparingContents=flatten(source.tableOfContents)
                 if(!unifiedEnabled){pendingPublication=source;source to null} else try {
+                    openingAttempts.stage(attempt,OpeningAttempt.Stage.ORDER_CHECK)
                     check(source.readingOrder.map{it.url().toString()}==value.chapters.map{it.href}) {"SOURCE_ORDER"}
-                    val derived=UnifiedDocument.prepare(value,java.io.File(filesDir,"renditions-v1"),preparingContents)
+                    val derived=UnifiedDocument.prepare(value,java.io.File(filesDir,"renditions-v1"),preparingContents,{openingAttempts.stage(attempt,it)},{openingAttempts.provider(attempt,it)})
+                    openingAttempts.derived(attempt,derived)
+                    openingAttempts.stage(attempt,OpeningAttempt.Stage.DERIVED_OPEN)
                     engine.open(derived.file).also{pendingPublication=it} to derived
                 }finally{source.close()}
             }
-        } catch(e:Exception) {
-            if(e is CancellationException){pendingPublication?.close();throw e}
-            status.text=if(e is UnifiedUnsupported)e.message else "Не удалось подготовить единую ленту. Источник и пометки сохранены."
-            AlertDialog.Builder(this).setTitle("Единая лента не подготовлена").setMessage(status.text)
-                .setPositiveButton("Прежний режим"){_,_->setUnified(false);lifecycleScope.launch{load(value)}}
-                .setNegativeButton("Закрыть",null).show()
-            return
-        }
+        } catch(e:Exception) {pendingPublication?.close();throw e}
+        currentCoroutineContext().ensureActive()
+        check(openingAttempts.isCurrent(attempt)){"STALE_OPEN"}
+        openingAttempts.stage(attempt,OpeningAttempt.Stage.NAVIGATOR_INIT)
         val (pub,derived)=prepared
         pendingPublication=null;contents=preparingContents
         val adapter=RenditionAdapter(value,derived)
@@ -263,6 +267,8 @@ open class MainActivity : AppCompatActivity() {
         })
         heading.text = value.title
         status.text = if(derived!=null)"Единая лента. Долгое нажатие → Пометка. Оглавление — в диагностике."else"Прежний режим по разделам. Долгое нажатие → Пометка."
+        openingAttempts.success(attempt,adapter.mode)
+        openMs=0
         readingTrace.metadata(buildMetadata())
         if(value.total==0){progress.text="0% · в книге нет читаемого текста";return}
         readerJob = lifecycleScope.launch {
@@ -294,6 +300,16 @@ open class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+        } catch(e:Exception) {
+            openingAttempts.failed(attempt,e)
+            if(e is CancellationException)throw e
+            if(!openingAttempts.isCurrent(attempt))return
+            val failed=openingAttempts.json().getJSONObject("latest")
+            status.text="Ошибка открытия: ${failed.getString("stage")} (${failed.getString("errorCode")}). Источник и пометки сохранены."
+            AlertDialog.Builder(this).setTitle("Книга не открыта").setMessage(status.text)
+                .setPositiveButton("Прежний режим"){_,_->setUnified(false);openingJob=lifecycleScope.launch{load(value)}}
+                .setNegativeButton("Закрыть",null).show()
         }
     }
     private fun preferences() = EpubPreferences(scroll = true, fontSize = notes?.data?.optDouble("fontSize", 1.0) ?: 1.0, pageMargins = 2.0, publisherStyles = false)
