@@ -37,7 +37,7 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class ReaderRuntimeTest {
     private fun launch(token: String): ActivityScenario<ReaderRuntimeActivity> = ActivityScenario.launch(
-        Intent(InstrumentationRegistry.getInstrumentation().targetContext, ReaderRuntimeActivity::class.java).putExtra("testToken", token))
+        Intent(InstrumentationRegistry.getInstrumentation().targetContext, ReaderRuntimeActivity::class.java).putExtra("testToken", token).putExtra("mode","sections"))
     private fun activity(scenario: ActivityScenario<ReaderRuntimeActivity>): ReaderRuntimeActivity {
         lateinit var result: ReaderRuntimeActivity; scenario.onActivity { result = it }; return result
     }
@@ -181,8 +181,8 @@ class ReaderRuntimeTest {
                 }
             }
             checkResource(0)
-            for(index in listOf(1,2)){onView(withId(23001)).perform(swipeLeft());checkResource(index)}
-            for(index in listOf(1,0)){onView(withId(23001)).perform(swipeRight());checkResource(index)}
+            for(index in listOf(1,2)){onView(withText("Раздел →")).perform(click());checkResource(index)}
+            for(index in listOf(1,0)){onView(withText("← Раздел")).perform(click());checkResource(index)}
             onView(withText("А+")).perform(click());checkResource(0)
             scenario.recreate();checkResource(0)
         }

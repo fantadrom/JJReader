@@ -12,7 +12,7 @@ import kotlin.coroutines.resumeWithException
 
 /** Android audio/focus and bounded cache for SpeechQueue. No background service or WakeLock. */
 class PhrasePlayer(context: Context, private val scope: CoroutineScope,
-                   onPhrase: suspend (Phrase?) -> Unit, private val status: (String) -> Unit) {
+                   onPhrase: suspend (Phrase?) -> Unit, private val status: (String) -> Unit, private val localAudio:((Phrase)->File?)?=null) {
     private val edge = EdgeClient()
     private val alternativeEdge = EdgeClient(route=EdgeRoute.READEST)
     private val directory = File(context.cacheDir, "tts-p0").apply { mkdirs() }
@@ -73,6 +73,7 @@ class PhrasePlayer(context: Context, private val scope: CoroutineScope,
     fun diagnosticText(): String = if (diagnostics.text().contains("\"id\"")) diagnostics.text() else
         try { BookStore.readAtomic(diagnosticFile).toString(2) } catch (_: Exception) { "Попыток озвучки пока нет" }
     private suspend fun audio(phrase: Phrase, voice: Voice, attempt: SpeechDiagnostics.Attempt): File {
+        localAudio?.invoke(phrase)?.let{attempt.record("localFixture");return it}
         return cache.get(phrase, voice, attempt)
     }
     private suspend fun play(file: File, attempt: SpeechDiagnostics.Attempt, onStarted: suspend () -> Unit) {

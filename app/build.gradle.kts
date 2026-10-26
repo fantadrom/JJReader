@@ -13,8 +13,8 @@ android {
         applicationId = "com.fantadrom.jjreader"
         minSdk = 31
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.1.8-p0"
+        versionCode = 10
+        versionName = "0.1.9-p0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -46,6 +46,7 @@ android {
     testOptions.unitTests.all {
         // Readium's real injector uses android.net.Uri. Robolectric supplies that API;
         // downloaded JVM Android artifacts stay inside the ignored workspace directory.
+        it.systemProperty("jj.sectionBenchmark", providers.gradleProperty("jjSectionBenchmark").orElse("false").get())
         it.systemProperty("jj.benchmark", providers.gradleProperty("jjBenchmark").orElse("false").get())
         it.systemProperty("maven.repo.local", rootProject.file("work/robolectric-m2").absolutePath)
         it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")

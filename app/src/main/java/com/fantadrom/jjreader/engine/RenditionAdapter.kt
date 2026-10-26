@@ -9,8 +9,8 @@ import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.shared.publication.Locator
 
 /** The only source/render coordinate boundary. Persistent addresses always remain source-local. */
-class RenditionAdapter(val book:Book,val unified:UnifiedDocument?=null) {
-    val mode get()=if(unified==null)"legacy"else"unified"
+class RenditionAdapter(val book:Book,val unified:UnifiedDocument?=null,val sections:Boolean=false) {
+    val mode get()=if(unified!=null)"unified"else if(sections)"sections"else"legacy"
     private val lengths=book.chapters.map{TextModel.length(it.text)}
     private val prefixes=IntArray(lengths.size+1).apply{for(i in lengths.indices)this[i+1]=this[i]+lengths[i]}
     fun absolute(chapter:Int,offset:Int):Int {require(chapter in lengths.indices && offset in 0..lengths[chapter]);return prefixes[chapter]+offset}
@@ -54,10 +54,13 @@ class RenditionAdapter(val book:Book,val unified:UnifiedDocument?=null) {
     }
     internal fun port(nav:EpubNavigatorFragment,bridge:LocatorBridge,go:suspend(Int)->Boolean):ReaderPort = object:ReaderPort {
         var observed=0;var requested=0
+        override val resolveMissingLocations get()=true
+        override val sections get()=this@RenditionAdapter.sections
+        override fun nativeLocator()=nav.currentLocator.value
         override val continuous get()=unified!=null
         override fun chapterIndex()=if(continuous)observed else book.chapters.indexOfFirst{it.href.substringBefore('#')==nav.currentLocator.value.href.toString().substringBefore('#')}
         override fun matches(state:JSONObject,index:Int):Boolean?=if(!continuous)null else state.optString("url").substringBefore('#').endsWith("/"+UnifiedDocument.HREF) && state.optInt("sourceChapter",-1)==index && state.optString("generation")==unified!!.generation
-        override suspend fun context(index:Int):JSONObject? {requested=index;return call(if(continuous)"JJ.forSection($index).context()"else"JJ.context()")}
+        override suspend fun context(index:Int):JSONObject? {requested=index;if(sections)bridge.call(nav,"JJ.enableSections()");return call(if(continuous)"JJ.forSection($index).context()"else"JJ.context()")}
         override suspend fun text()=if(continuous)bridge.call(nav,"({text:JJ.forSection($requested).text})")?.getString("text")else bridge.text(nav)
         override suspend fun goResource(index:Int):Boolean {requested=index;return if(continuous)true else go(index)}
         override suspend fun go(locator:Locator){if(!continuous)nav.go(locator,animated=false)}

@@ -13,10 +13,10 @@ class OpeningAttempt(private val file:File) {
     enum class Stage { SOURCE_OPEN, ORDER_CHECK, CACHE_CHECK, BUILD, XML_VALIDATE, CACHE_PUBLISH, DERIVED_OPEN, NAVIGATOR_INIT }
     private fun read()=runCatching{BookStore.readAtomic(file)}.getOrElse{JSONObject().put("schema",1)}
     fun json():JSONObject=synchronized(lock){read()}
-    fun begin(version:String,code:Long,unified:Boolean,activeMode:String?):String=synchronized(lock){
+    fun begin(version:String,code:Long,unified:Boolean,activeMode:String?,requestedMode:String=if(unified)"unified"else"legacy"):String=synchronized(lock){
         val id=UUID.randomUUID().toString();val root=read()
         root.put("latest",JSONObject().put("attemptId",id).put("versionName",version).put("versionCode",code)
-            .put("requestedMode",if(unified)"unified"else"legacy").put("activeMode",activeMode ?: JSONObject.NULL)
+            .put("requestedMode",requestedMode).put("activeMode",activeMode ?: JSONObject.NULL)
             .put("outcome","running").put("stage",Stage.SOURCE_OPEN.name).put("startedUtc",Instant.now().toString())
             .put("elapsedMs",0).put("converter",if(unified)UnifiedDocument.VERSION else JSONObject.NULL)
             .put("generation",JSONObject.NULL).put("cacheHit",JSONObject.NULL).put("errorCode",JSONObject.NULL)

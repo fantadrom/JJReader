@@ -33,6 +33,7 @@ class P0PersistenceTest {
         assertEquals(3, chapters.size)
         assertFalse(chapters.any { it.text.contains("Альтернативный текст") })
         val book = store.commit(stage, "Проверка", chapters)
+        store.select(book.id)
         val note = JSONObject().put("id", "trial").put("chapter", 0).put("start", 0).put("end", 4)
             .put("quote", TextModel.slice(chapters[0].text, 0, 4)).put("comment", "Проверка сохранения")
         NoteStore(context, book.id).add(note)
@@ -45,6 +46,7 @@ class P0PersistenceTest {
         val pub = ReadiumEngine(context).open(stage)
         val chapters = try { ReadiumEngine(context).chapters(pub) } finally { pub.close() }
         val book = store.commit(stage, "Книга", chapters)
+        store.select(book.id)
         NoteStore(context, book.id).apply { data.put("draft", JSONObject().put("comment", "черновик")); save() }
         try { store.stage("Not a zip".byteInputStream()); fail("Expected rejection") } catch (_: java.util.zip.ZipException) { }
         assertEquals(book.id, store.current()!!.id)

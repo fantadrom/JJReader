@@ -21,6 +21,9 @@ class StaleReaderOperation : CancellationException("STALE_READER_OPERATION")
 
 internal interface ReaderPort {
     val continuous: Boolean get()=false
+    val sections: Boolean get()=false
+    val resolveMissingLocations:Boolean get()=false
+    fun nativeLocator():Locator?=null
     fun matches(state:JSONObject,index:Int):Boolean?=null
     suspend fun context(index:Int):JSONObject?=call("JJ.context()")
     fun chapterIndex(): Int
@@ -94,10 +97,10 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             afterAwait(operation)
             emit(ReadingTrace.Event.DOM,target=expected,state=state,accepted=state!=null && matchesState(state,expected),operation=operation)
             if (state != null && matchesState(state,expected)) {
-                if(port.continuous && (!state.optBoolean("documentReady",true) || !state.optBoolean("fontReady",true) || !state.optBoolean("resourcesReady",true))) { delay(50);continue }
+                if((port.continuous || port.sections) && (!state.optBoolean("documentReady",true) || !state.optBoolean("fontReady",true) || !state.optBoolean("resourcesReady",true))) { delay(50);continue }
                 check(state.getBoolean("nativeReady")) { "READIUM_SCRIPT_MISSING" }
                 val id = state.getString("documentId")
-                if(port.continuous){
+                if(port.continuous || port.sections){
                     if(navigationDocument!=id){navigationDocument=id;navigationSerial=0}
                     val serial=state.optInt("navigationSerial")
                     if(serial!=navigationSerial){navigationSerial=serial;userNavigation();onUserNavigation();throw StaleReaderOperation()}
@@ -179,6 +182,11 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         initialAttempted = true
         val operation = freeze()
         try {
+            if(port.sections && data.optString("positionKind")=="visual") {
+                val visual=data.getJSONObject("visualPosition")
+                restoreVisual(visual.getInt("chapter"),visual.optBoolean("end"),operation,visual.optJSONObject("locator")?.let(Locator::fromJSON))
+                return
+            }
             val saved = data.optJSONObject("positionV2")?.let { JSONObject(it.toString()) }
             emit(ReadingTrace.Event.INITIAL,target=saved?.optInt("chapter"),anchor=saved)
             val locatorJson = data.optJSONObject("locator")?.let { JSONObject(it.toString()) }
@@ -223,8 +231,8 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         }
     }
     /** One operation owns resource navigation, acknowledgement and synchronous durable commit. */
-    suspend fun navigateTo(anchor: JSONObject) {
-        source = ReadingTrace.Source.NOTE
+    suspend fun navigateTo(anchor: JSONObject,from:ReadingTrace.Source=ReadingTrace.Source.NOTE) {
+        source = from
         initialAttempted = true
         val operation = freeze()
         try {
@@ -250,6 +258,45 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             if(!ready)throw RestoreFailure(lastRestoreCode ?: code(e,"navigate"))
         }
     }
+    suspend fun navigateBoundary(index:Int,end:Boolean,from:ReadingTrace.Source) {
+        require(index in book.chapters.indices)
+        val length=TextModel.length(book.chapters[index].text)
+        if(length>0) {
+            val offset=if(end)length-1 else 0
+            navigateTo(JSONObject().put("chapter",index).put("start",offset).put("end",offset+1).put("quote",TextModel.slice(book.chapters[index].text,offset,offset+1)),from)
+            if(port.sections && end && port.call("JJ.contentState()")?.optBoolean("lastMedia")==true)restoreVisual(index,true,freeze(from))
+        } else restoreVisual(index,end,freeze(from))
+    }
+    private fun persistVisual(index:Int,end:Boolean,operation:Long) {
+        guard(operation)
+        val locator=port.nativeLocator()
+        data.put("positionKind","visual").put("visualPosition",JSONObject().put("schema",1).put("chapter",index).put("end",end).put("locator",locator?.toJSON()))
+        if(locator!=null)data.put("locator",locator.toJSON())
+        save();phase=Phase.TRACKING
+    }
+    private suspend fun restoreVisual(index:Int,end:Boolean,operation:Long,locator:Locator?=null) {
+        initialAttempted=true;phase=Phase.RESTORING;activeTarget=index
+        try {
+            check(port.goResource(index));afterAwait(operation)
+            context(index,operation)
+            if(locator!=null){port.go(locator);afterAwait(operation);context(index,operation)}
+            val request=UUID.randomUUID().toString()
+            check(port.call("({ok:JJ.requestVisualRestore(${JSONObject.quote(request)},${if(locator==null || end)end.toString() else "null"})})")?.optBoolean("ok")==true)
+            withTimeout(6000){while(true){val state=port.call("JJ.visualStatus()");afterAwait(operation)
+                if(state?.optString("id")==request && matchesState(state,index) && state.optString("phase")=="confirmed" && positiveViewport(state) && state.optBoolean("layoutStable"))break
+                delay(40)
+            }}
+            guard(operation);persistVisual(index,end,operation);lastRestoreCode=null
+            emit(ReadingTrace.Event.ACK,target=index,accepted=true)
+        }catch(e:Exception){if(revision==operation){phase=Phase.RECOVERING;lastRestoreCode=code(e,"visual")};throw e}
+        finally{if(revision==operation)activeTarget=null}
+    }
+    suspend fun confirmLink(index:Int,locator:Locator) {
+        val operation=freeze(ReadingTrace.Source.NATIVE);initialAttempted=true
+        port.go(locator);afterAwait(operation);context(index,operation)
+        phase=Phase.RECOVERING
+        check(recoverVisible(operation)){"LINK_NOT_CONFIRMED"}
+    }
     fun validate(anchor: JSONObject, index: Int) {
         require(index in book.chapters.indices) { "ANCHOR_RESOURCE" }
         if (anchor.has("bookId")) check(anchor.getString("bookId") == book.id) { "ANCHOR_BOOK" }
@@ -267,6 +314,8 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             validate(anchor,index)
             stage = "context"
             val state = context(index,operation)
+            val resolved=if(anchor.has("locations") || !port.resolveMissingLocations)anchor else checkNotNull(port.call("JJ.anchor(${anchor.getInt("start")},${anchor.getInt("end")})"))
+            afterAwait(operation);validate(resolved,index)
             activeRequest = UUID.randomUUID().toString()
             val request = checkNotNull(activeRequest)
             stage = "request"
@@ -301,7 +350,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             guard(operation)
             emit(ReadingTrace.Event.ACK,target=index,state=last,anchor=anchor,accepted=true)
             stage = "save"
-            persistAnchor(anchor,index,operation)
+            persistAnchor(resolved,index,operation)
             lastRestoreCode = null; phase = Phase.TRACKING
             emit(ReadingTrace.Event.READY,target=index)
         } catch(e: Exception) {
@@ -318,6 +367,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             .put("textHash", hashes[index]).put("schema", 1)
         val locator = port.locator(anchor)
         anchor.put("locator", locator.toJSON())
+        data.remove("positionKind");data.remove("visualPosition")
         data.put("positionV2", anchor).put("locator", locator.toJSON())
         save()
         trace?.record(ReadingTrace.Event.COMMIT,from,activityId,id,book.id,revision,index,chapterIndex(),
@@ -335,6 +385,10 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             snap=port.call("JJ.viewport()") ?: return null;afterAwait(operation)
         }
         if(revision!=operation || snap.optString("documentId")!=state.getString("documentId") || !matchesState(snap,index))return null
+        if(port.sections && snap.optBoolean("visual") && snap.optBoolean("layoutStable") && positiveViewport(snap)) {
+            persistVisual(index,snap.optBoolean("visualEnd"),operation)
+            return snap
+        }
         if(!snap.optBoolean("layoutReady") || !snap.optBoolean("layoutStable") || !positiveViewport(snap) || !snap.optBoolean("shown")) {
             emit(ReadingTrace.Event.REJECT,ReadingTrace.Source.CAPTURE,state=snap,failure=RestoreCode.LAYOUT_UNSTABLE);return null
         }
