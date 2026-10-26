@@ -43,6 +43,8 @@ open class MainActivity : AppCompatActivity() {
     private var publication: Publication? = null
     private var navigator: EpubNavigatorFragment? = null
     private var readerJob: Job? = null
+    private var openingJob: Job? = null
+    private var decorationJob:Job?=null
     private var resizeJob: Job? = null
     private var navigationJob: Job? = null
     private var busy = false
@@ -54,6 +56,13 @@ open class MainActivity : AppCompatActivity() {
     private var session: ReaderSession? = null
     private var selectionSession: String? = null
     private var speechChapter: Int? = null
+    private var rendition: RenditionAdapter? = null
+    private var contents = emptyList<Pair<String,String>>()
+    private var openMs = 0L
+    private var lastPrepareMs = 0L
+    private var documentCacheHit = false
+    private var speechNavigationSerial=0
+    internal suspend fun highlightForTests(phrase:Phrase?)=highlightPhrase(phrase)
     internal fun readerSessionForTests() = session
     internal fun commentEditorVisibleForTests() = editor?.isShowing == true
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -68,7 +77,7 @@ open class MainActivity : AppCompatActivity() {
         store = BookStore(this); engine = ReadiumEngine(this); bridge = LocatorBridge(this)
         buildUi()
         player = PhrasePlayer(this, lifecycleScope, { highlightPhrase(it) }, { status.text = it })
-        lifecycleScope.launch {
+        openingJob=lifecycleScope.launch {
             try {
                 val previous = withContext(Dispatchers.IO) { store.current() }
                 if (previous != null) load(previous) else status.text = "Откройте EPUB или пример. Это прототип P0."
@@ -102,14 +111,36 @@ open class MainActivity : AppCompatActivity() {
         setContentView(root)
     }
     internal fun readingTraceForTests() = readingTrace.json()
-    private fun combinedDiagnostics(): String = JSONObject().put("reader",readingTrace.json())
+    private fun buildMetadata():JSONObject {
+        val info=packageManager.getPackageInfo(packageName,0)
+        return JSONObject().put("versionName",info.versionName).put("versionCode",info.longVersionCode)
+            .put("mode",rendition?.mode ?: "preparing").put("converter",rendition?.unified?.map?.optString("converter") ?: "legacy")
+            .put("generation",rendition?.unified?.generation ?: "legacy").put("sourceModel",1).put("readingSchema",3)
+            .put("runtime","Android WebView").put("webView",android.webkit.WebView.getCurrentWebViewPackage()?.versionName ?: "unknown")
+            .put("prepareMs",lastPrepareMs).put("cacheHit",documentCacheHit).put("openMs",openMs)
+    }
+    private fun combinedDiagnostics(): String = JSONObject().put("build",buildMetadata()).put("reader",readingTrace.json())
         .put("tts",runCatching{JSONObject(player.diagnosticText())}.getOrElse{JSONObject().put("available",false)}).toString(2)
+    private fun setUnified(enabled:Boolean) {
+        getSharedPreferences("reader",MODE_PRIVATE).edit().putBoolean("unified",enabled).apply()
+    }
     private fun showDiagnosticActions() {
-        AlertDialog.Builder(this).setTitle("Проверки P0").setItems(arrayOf("Сравнить маршруты: 4 сетевых запроса", "Начать новую трассу чтения")) { _, which ->
+        AlertDialog.Builder(this).setTitle("Проверки P0").setItems(arrayOf("Сравнить маршруты: 4 сетевых запроса", "Начать новую трассу чтения", "Оглавление / разделы", "Режим: единая лента / прежний")) { _, which ->
             if(which==0) AlertDialog.Builder(this).setTitle("Сравнение голосов/маршрутов")
                 .setMessage("4 запроса Microsoft: два голоса × два маршрута, последовательно, без кеша, prefetch и повторов. Только фраза «${VoiceProbe.TEXT}». Обычный маршрут не меняется. После проверки откройте диагностику и скопируйте общий результат.")
                 .setPositiveButton("Запустить"){_,_->player.checkVoices(compareRoutes=true)}.setNegativeButton("Отмена",null).show()
-            else { readingTrace.begin(); readingTrace.record(ReadingTrace.Event.CREATE,ReadingTrace.Source.DIAGNOSTIC,activityId); session?.traceState(ReadingTrace.Event.INITIAL,ReadingTrace.Source.DIAGNOSTIC); status.text="Трасса начата. После сценария скопируйте диагностику." }
+            else if(which==2) showContents()
+            else if(which==3) AlertDialog.Builder(this).setTitle("Режим чтения").setItems(arrayOf("Единая лента","Прежний режим по разделам")){_,mode->
+                val previous=openingJob
+                lifecycleScope.launch {
+                    previous?.cancelAndJoin()
+                    player.reset();session?.capture()
+                    setUnified(mode==0)
+                    val current=withContext(Dispatchers.IO){store.current()}
+                    if(current!=null)load(current)
+                }
+            }.setNegativeButton("Отмена",null).show()
+            else { readingTrace.begin();readingTrace.metadata(buildMetadata()); readingTrace.record(ReadingTrace.Event.CREATE,ReadingTrace.Source.DIAGNOSTIC,activityId); session?.traceState(ReadingTrace.Event.INITIAL,ReadingTrace.Source.DIAGNOSTIC); status.text="Трасса начата. После сценария скопируйте диагностику." }
         }.setNegativeButton("Закрыть",null).show()
     }
     private fun traceDialog(source:ReadingTrace.Source,reason:ReadingTrace.Reason) {
@@ -144,7 +175,7 @@ open class MainActivity : AppCompatActivity() {
     }
     private fun importBook(copy: () -> java.io.File) {
         player.pause(); busy = true; status.text = "Импорт внутренней копии EPUB…"
-        lifecycleScope.launch {
+        openingJob=lifecycleScope.launch {
             var staged: java.io.File? = null
             try {
                 val imported = withContext(Dispatchers.IO) {
@@ -159,6 +190,7 @@ open class MainActivity : AppCompatActivity() {
         }
     }
     private suspend fun load(value: Book) {
+        openingJob=currentCoroutineContext()[Job]
         val newNotes = withContext(Dispatchers.IO) { NoteStore(this@MainActivity, value.id) }
         fun indexOf(href:String?) = value.chapters.indexOfFirst { it.href.substringBefore('#') == href?.substringBefore('#') }
         fun storeEvent(event:ReadingTrace.Event,source:ReadingTrace.Source,data:JSONObject,disk:JSONObject?) {
@@ -171,14 +203,42 @@ open class MainActivity : AppCompatActivity() {
         }
         newNotes.onSaved = { source,data,disk -> storeEvent(ReadingTrace.Event.STORE_WRITE,ReadingTrace.Source.valueOf(source.name),data,disk) }
         storeEvent(ReadingTrace.Event.STORE_LOAD,ReadingTrace.Source.INITIAL,newNotes.data,newNotes.readDisk())
-        val pub = withContext(Dispatchers.IO) { engine.open(value.file) }
+        val openBegan=System.nanoTime()
+        val unifiedEnabled=getSharedPreferences("reader",MODE_PRIVATE).getBoolean("unified",true)
+        status.text=if(unifiedEnabled)"Подготовка единой ленты…"else"Открытие разделов…"
+        val prepared: Pair<Publication,UnifiedDocument?>
+        var pendingPublication:Publication?=null
+        var preparingContents=emptyList<Pair<String,String>>()
+        try {
+            prepared=withContext(Dispatchers.IO) {
+                val source=engine.open(value.file)
+                fun flatten(items:List<org.readium.r2.shared.publication.Link>):List<Pair<String,String>> = items.flatMap{listOf((it.title ?: "Раздел") to it.url().toString())+flatten(it.children)}
+                preparingContents=flatten(source.tableOfContents)
+                if(!unifiedEnabled){pendingPublication=source;source to null} else try {
+                    check(source.readingOrder.map{it.url().toString()}==value.chapters.map{it.href}) {"SOURCE_ORDER"}
+                    val derived=UnifiedDocument.prepare(value,java.io.File(filesDir,"renditions-v1"),preparingContents)
+                    engine.open(derived.file).also{pendingPublication=it} to derived
+                }finally{source.close()}
+            }
+        } catch(e:Exception) {
+            if(e is CancellationException){pendingPublication?.close();throw e}
+            status.text=if(e is UnifiedUnsupported)e.message else "Не удалось подготовить единую ленту. Источник и пометки сохранены."
+            AlertDialog.Builder(this).setTitle("Единая лента не подготовлена").setMessage(status.text)
+                .setPositiveButton("Прежний режим"){_,_->setUnified(false);lifecycleScope.launch{load(value)}}
+                .setNegativeButton("Закрыть",null).show()
+            return
+        }
+        val (pub,derived)=prepared
+        pendingPublication=null;contents=preparingContents
+        val adapter=RenditionAdapter(value,derived)
+        lastPrepareMs=derived?.prepareMs ?: 0;documentCacheHit=derived?.cacheHit ?: false
         session?.freeze()
-        navigationJob?.cancelAndJoin(); resizeJob?.cancelAndJoin(); readerJob?.cancelAndJoin(); player.reset()
+        navigationJob?.cancelAndJoin(); resizeJob?.cancelAndJoin(); readerJob?.cancelAndJoin();decorationJob?.cancelAndJoin(); player.reset()
         navigator?.let { supportFragmentManager.beginTransaction().remove(it).commitNow() }
         publication?.close()
-        book = value; notes = newNotes; publication = pub; verifiedHref = null; mappingValid = false
+        book = value; notes = newNotes; publication = pub; rendition=adapter; verifiedHref = null; mappingValid = false
         supportFragmentManager.fragmentFactory = EpubNavigatorFactory(pub).createFragmentFactory(
-            initialLocator = newNotes.data.optJSONObject("locator")?.let { Locator.fromJSON(it) },
+            initialLocator = adapter.initialLocator(newNotes.data),
             initialPreferences = preferences(),
             configuration = EpubNavigatorFragment.Configuration {
                 shouldApplyInsetsPadding = false; selectionActionModeCallback = selectionCallback
@@ -186,7 +246,7 @@ open class MainActivity : AppCompatActivity() {
             })
         val nav = supportFragmentManager.fragmentFactory.instantiate(classLoader, EpubNavigatorFragment::class.java.name) as EpubNavigatorFragment
         navigator = nav
-        val reader = ReaderSession(value, newNotes, nav, bridge, goResource = { index -> nav.go(pub.readingOrder[index], animated = false) }, trace=readingTrace, activityId=activityId)
+        val reader = ReaderSession(value,newNotes,adapter.port(nav,bridge){index->nav.go(pub.readingOrder[index],animated=false)},readingTrace,activityId){player.reset();speechChapter=null}
         session = reader
         speechChapter = null
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -201,8 +261,10 @@ open class MainActivity : AppCompatActivity() {
                 return true
             }
         })
-        heading.text = value.title; refreshNotes()
-        status.text = "Прокрутка внутри раздела; для границы — ←/→. Долгое нажатие → Пометка."
+        heading.text = value.title
+        status.text = if(derived!=null)"Единая лента. Долгое нажатие → Пометка. Оглавление — в диагностике."else"Прежний режим по разделам. Долгое нажатие → Пометка."
+        readingTrace.metadata(buildMetadata())
+        if(value.total==0){progress.text="0% · в книге нет читаемого текста";return}
         readerJob = lifecycleScope.launch {
             var draftShown = false
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -217,14 +279,16 @@ open class MainActivity : AppCompatActivity() {
                         newNotes.data.put("engineLocator", locator.toJSON())
                         reader.traceState(ReadingTrace.Event.NATIVE,ReadingTrace.Source.NATIVE)
                         reader.observeResource()
-                        if (speechChapter != null && speechChapter != reader.chapterIndex()) { player.reset(); speechChapter = null }
+                        if (adapter.unified==null && speechChapter != null && speechChapter != reader.chapterIndex()) { player.reset(); speechChapter = null }
                     }
                 }
                 launch {
                     while (isActive) {
                         try { updateViewport(nav) } catch (e: Exception) { if (e is CancellationException && e !is StaleReaderOperation) throw e; progress.text = "Процент: DOM ещё не готов" }
                         if(!draftShown && reader.ready) {
-                            draftShown=true;newNotes.data.optJSONObject("draft")?.let{editNote(it)}
+                            draftShown=true
+                            openMs=(System.nanoTime()-openBegan)/1_000_000;readingTrace.metadata(buildMetadata())
+                            refreshNotes();newNotes.data.optJSONObject("draft")?.let{editNote(it)}
                         }
                         delay(350)
                     }
@@ -251,20 +315,50 @@ open class MainActivity : AppCompatActivity() {
             } catch (e: Exception) { handle(e) }
         }
     }
-    private fun chapterIndex(nav: EpubNavigatorFragment) = book?.chapters?.indexOfFirst { it.href.substringBefore('#') == nav.currentLocator.value.href.toString().substringBefore('#') } ?: -1
+    private fun chapterIndex(nav: EpubNavigatorFragment) = session?.chapterIndex() ?: -1
     private fun changeResource(delta: Int) {
-        val nav = navigator ?: return; val pub = publication ?: return
-        player.reset(); speechChapter = null; val index = chapterIndex(nav) + delta
-        navigationJob?.cancel(); resizeJob?.cancel(); session?.userNavigation()
-        if (index in pub.readingOrder.indices) nav.go(pub.readingOrder[index], animated = false)
+        val current=book ?: return;val index=(session?.chapterIndex() ?: 0)+delta
+        if(index !in current.chapters.indices)return
+        if(rendition?.unified!=null)jumpSource(index) else {
+            player.reset();speechChapter=null;navigationJob?.cancel();resizeJob?.cancel();session?.userNavigation()
+            navigator?.go(checkNotNull(publication).readingOrder[index],animated=false)
+        }
+    }
+    private fun jumpSource(index:Int,targetId:String?=null) {
+        val adapter=rendition ?: return;val nav=navigator ?: return;val reader=session ?: return
+        player.reset();navigationJob?.cancel();resizeJob?.cancel()
+        navigationJob=lifecycleScope.launch {
+            try {
+                if(adapter.unified==null){
+                    reader.userNavigation()
+                    val link=if(targetId==null)checkNotNull(publication).readingOrder[index] else checkNotNull(org.readium.r2.shared.publication.Link.fromJSON(JSONObject().put("href",targetId).put("type","application/xhtml+xml")))
+                    nav.go(link,animated=false);return@launch
+                }
+                val (actual,offset)=adapter.boundary(index) ?: error("В книге нет текста для перехода")
+                var target=targetId?.let{bridge.call(nav,"JJ.forSection($actual).anchorForId(${JSONObject.quote(it)})")}
+                if(target==null)target=adapter.anchor(bridge,nav,actual,offset,offset+1)
+                target.put("chapter",actual);reader.navigateTo(target)
+            }catch(e:Exception){handle(e)}
+        }
+    }
+    private fun showContents() {
+        val adapter=rendition ?: return
+        val toc=adapter.unified?.map?.getJSONArray("toc")
+        if(toc!=null)AlertDialog.Builder(this).setTitle(if(adapter.unified.map.getBoolean("authorToc"))"Оглавление"else"Разделы — оглавление отсутствует")
+            .setItems((0 until toc.length()).map{toc.getJSONObject(it).getString("title")}.toTypedArray()){_,which->val item=toc.getJSONObject(which);jumpSource(item.getInt("chapter"),item.getString("target"))}.setNegativeButton("Закрыть",null).show()
+        else AlertDialog.Builder(this).setTitle(if(contents.isNotEmpty())"Оглавление"else"Разделы — оглавление отсутствует")
+            .setItems((if(contents.isNotEmpty())contents.map{it.first}else adapter.book.chapters.map{it.title}).toTypedArray()){_,which->
+                val index=if(contents.isNotEmpty())adapter.book.chapters.indexOfFirst{it.href.substringBefore('#')==contents[which].second.substringBefore('#')}else which
+                if(index>=0)jumpSource(index,contents.getOrNull(which)?.second)
+            }.setNegativeButton("Закрыть",null).show()
     }
     private suspend fun updateViewport(nav: EpubNavigatorFragment) {
         val current = book ?: return; val index = chapterIndex(nav); if (index < 0) return
         val reader = session ?: return
         val viewport = reader.capture() ?: return
         mappingValid = true; verifiedHref = nav.currentLocator.value.href.toString()
-        val end = viewport.getInt("last"); visibleFirst = viewport.getInt("first").coerceAtLeast(0); if (end < 0) return
-        progress.text = "${TextModel.percent(current.offset(index) + end, current.total)}% · эксперимент · ресурс ${index + 1}/${current.chapters.size}"
+        val end = viewport.getInt("last"); visibleFirst = (viewport.optJSONObject("anchor")?.optInt("start") ?: viewport.getInt("first")).coerceAtLeast(0); if (end < 0) return
+        progress.text = "${TextModel.percent(checkNotNull(rendition).absolute(viewport.optInt("lastSourceChapter",index),end),current.total)}% · эксперимент · ресурс ${index + 1}/${current.chapters.size}"
     }
     private val selectionCallback = object : ActionMode.Callback {
         override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
@@ -335,12 +429,18 @@ open class MainActivity : AppCompatActivity() {
         dialog.show()
     }
     private fun refreshNotes() {
-        val list = notes?.notes ?: emptyList(); notesButton.text = "Пометки · ${list.size}"
-        lifecycleScope.launch {
-            navigator?.applyDecorations(list.flatMap { note ->
-                val locator = Locator.fromJSON(note.getJSONObject("locator")) ?: return@flatMap emptyList()
+        val list = notes?.notes?.sortedWith(compareBy({it.optInt("chapter")},{it.optInt("start")})) ?: emptyList(); notesButton.text = "Пометки · ${list.size}"
+        val nav=navigator ?: return;val adapter=rendition ?: return;val reader=session ?: return
+        decorationJob?.cancel()
+        decorationJob=lifecycleScope.launch {
+            val decorations=list.flatMap { note ->
+                val locator = try {
+                    if(adapter.unified!=null)adapter.displayLocator(bridge,nav,note)
+                    else Locator.fromJSON(note.getJSONObject("locator")) ?: return@flatMap emptyList()
+                }catch(e:Exception){if(e is CancellationException)throw e;status.text="Некоторые пометки недоступны в единой ленте. Данные сохранены; доступен прежний режим.";return@flatMap emptyList()}
                 listOf(Decoration(note.getString("id"), locator, Decoration.Style.Highlight(0xFFFFD85A.toInt())), Decoration(note.getString("id") + "-icon", locator, MarginMark()))
-            }, "notes")
+            }
+            currentCoroutineContext().ensureActive();if(session===reader)nav.applyDecorations(decorations,"notes")
         }
     }
     private fun showNotes() {
@@ -350,6 +450,7 @@ open class MainActivity : AppCompatActivity() {
         if (list.isEmpty()) { status.text = "Выделите текст долгим нажатием → Пометка."; return }
         val listDialog = AlertDialog.Builder(this).setTitle("Пробные пометки").setItems(list.map { it.getString("quote").take(70) + " — " + it.getString("comment") }.toTypedArray()) { _, which ->
             val reader = session ?: return@setItems
+            player.reset();speechChapter=null
             val note = JSONObject(list[which].toString())
             navigationJob?.cancel(); resizeJob?.cancel()
             navigationJob = lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -379,26 +480,37 @@ open class MainActivity : AppCompatActivity() {
     private fun startSpeech() {
         lifecycleScope.launch {
             try {
-                val nav = navigator ?: return@launch
-                check(session?.ready == true) { "Дождитесь восстановления места чтения" }
+                val nav=navigator ?: return@launch;val reader=session ?: return@launch;val adapter=rendition ?: return@launch
+                check(reader.ready){"Дождитесь восстановления места чтения"}
+                val operation=reader.currentRevision
                 updateViewport(nav)
-                val chapter = book!!.chapters[chapterIndex(nav)]
-                val phrases = withContext(Dispatchers.Default) { Phrases.split(chapter.text) }.dropWhile { it.end <= visibleFirst }
-                speechChapter = chapterIndex(nav)
-                player.start(phrases, voice)
-            } catch (e: Exception) { handle(e) }
+                val source=reader.chapterIndex();val offset=visibleFirst
+                val phrases=withContext(Dispatchers.Default){adapter.phrases(source,offset).filter{adapter.unified!=null || it.chapter==source}}
+                currentCoroutineContext().ensureActive();reader.requireCurrent(operation)
+                check(session===reader && rendition===adapter){"STALE_READER_OPERATION"}
+                val state=reader.context(source)
+                currentCoroutineContext().ensureActive();reader.requireCurrent(operation)
+                speechChapter=source;speechNavigationSerial=state.optInt("navigationSerial")
+                player.start(phrases,voice)
+            }catch(e:Exception){handle(e)}
         }
     }
     private suspend fun highlightPhrase(phrase: Phrase?) {
         val nav = navigator ?: return
         if (phrase == null) { nav.applyDecorations(emptyList(), "tts"); return }
         val reader = session ?: return
-        reader.context()
-        val anchor = bridge.call(nav, "JJ.anchor(${phrase.start},${phrase.end})") ?: error("TTS_ANCHOR")
-        reader.validate(anchor, chapterIndex(nav))
+        val chapter=phrase.chapter.takeIf{it>=0} ?: chapterIndex(nav)
+        val operation=reader.currentRevision
+        reader.context(chapter)
+        val anchor=checkNotNull(rendition).anchor(bridge,nav,chapter,phrase.start,phrase.end)
+        currentCoroutineContext().ensureActive();reader.requireCurrent(operation)
+        reader.validate(anchor,chapter)
         val locator = bridge.locator(nav.currentLocator.value, anchor)
         nav.applyDecorations(listOf(Decoration("tts", locator, Decoration.Style.Underline(ReaderDecorations.BLUE))), "tts")
-        bridge.call(nav, "({ok:JJ.go(${phrase.start},${phrase.end})})")
+        currentCoroutineContext().ensureActive();reader.requireCurrent(operation)
+        val scope=if(rendition?.unified!=null)"JJ.forSection($chapter)"else"JJ"
+        val moved=bridge.call(nav,"({ok:$scope.go(${phrase.start},${phrase.end},$speechNavigationSerial)})")
+        if(moved?.optBoolean("ok")!=true)player.pause()
     }
     private fun persist() { try { notes?.save(NoteStore.Source.ACTIVITY) } catch (e: Exception) { handle(e) } }
     private fun handle(e: Exception) {

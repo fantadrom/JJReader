@@ -104,7 +104,7 @@ class ReaderAckFailureTest {
         try {
             val trace=ReadingTrace(File(dir,"trace.json"));trace.record(ReadingTrace.Event.REJECT,ReadingTrace.Source.NOTE,"activity",
                 geometry=JSONObject().put("viewportHeight",24).put("title","PRIVATE").put("url","https://SECRET").put("firstRect",JSONObject().put("top",40).put("quote","PRIVATE")),failureCode=RestoreCode.ANCHOR_NOT_VISIBLE,requestId="request")
-            val json=trace.json();assertEquals(2,json.getInt("schema"));assertTrue(json.toString().contains("ANCHOR_NOT_VISIBLE"))
+            val json=trace.json();assertEquals(3,json.getInt("schema"));assertTrue(json.toString().contains("ANCHOR_NOT_VISIBLE"))
             listOf("PRIVATE","SECRET","https://","quote","title").forEach{assertFalse(json.toString().contains(it))}
         }finally{dir.deleteRecursively()}
     }

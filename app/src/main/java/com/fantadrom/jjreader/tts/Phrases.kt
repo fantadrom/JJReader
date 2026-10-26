@@ -4,7 +4,7 @@ import com.fantadrom.jjreader.text.TextModel
 import java.text.BreakIterator
 import java.util.Locale
 
-data class Phrase(val start: Int, val end: Int, val text: String)
+data class Phrase(val start: Int, val end: Int, val text: String, val chapter: Int = -1)
 object Phrases {
     fun split(text: String): List<Phrase> {
         val iterator = BreakIterator.getSentenceInstance(Locale.forLanguageTag("ru"))

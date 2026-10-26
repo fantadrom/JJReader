@@ -1,4 +1,4 @@
-param([switch]$CrossResource)
+param([switch]$CrossResource, [switch]$Unified)
 $ErrorActionPreference = "Stop"
 # Optional developer regression. APKs must already be installed. App data is never cleared.
 $runner = "com.fantadrom.jjreader.test/androidx.test.runner.AndroidJUnitRunner"
@@ -7,6 +7,10 @@ $phaseArgument = "p02ProcessPhase"
 if ($CrossResource) {
     $test = "com.fantadrom.jjreader.ReaderRuntimeTest#crossResourceProcessRestartProbe"
     $phaseArgument = "p05ProcessPhase"
+}
+if ($Unified) {
+    $test = "com.fantadrom.jjreader.UnifiedReadingTest#unifiedProcessRestartProbe"
+    $phaseArgument = "p07ProcessPhase"
 }
 function Run-Probe($phase) {
     $result = adb shell am instrument -w -e class $test -e $phaseArgument $phase $runner

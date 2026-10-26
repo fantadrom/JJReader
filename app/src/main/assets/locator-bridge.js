@@ -2,13 +2,17 @@
 // This runs only in the current sanitized Readium resource; it exposes no Java interface.
 (function () {
   if (window.JJ) return;
+  const wrappers=document.documentElement.hasAttribute('data-jj-generation')?Array.from(document.querySelectorAll('body > section[data-jj-source]')):[];
+  const documentId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random();
+  let interaction=0,navigationSerial=0;
+  document.addEventListener('click',event=>{if(event.target instanceof Element && event.target.closest('a[href]')){navigationSerial++;interaction++;}},true);
+  for(const event of ['pointerdown','touchstart','wheel'])document.addEventListener(event,()=>{interaction++;},{passive:true});
+  function makeIndex(root,sourceChapter) {
   const blocks = new Set('p div section article h1 h2 h3 h4 h5 h6 li blockquote tr td figcaption pre br'.split(' '));
   const excluded = new Set('script style nav noscript iframe object svg math template'.split(' '));
   const chars = [], points = [];
-  const documentId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random();
   let selectionSession = null, selectionCache = null, restoreResult = null;
-  let interaction = 0, pinned = null, viewportSample = null;
-  for (const event of ['pointerdown','touchstart','wheel']) document.addEventListener(event,()=>{interaction++;pinned=null;},{passive:true});
+  let pinned=null,viewportSample=null;
   function sep() {
     while (chars[chars.length - 1] === ' ') { chars.pop(); points.pop(); }
     if (chars.length && chars[chars.length - 1] !== '\n') { chars.push('\n', '\n'); points.push(null, null); }
@@ -29,7 +33,7 @@
       }
     }
   }
-  visit(document.body);
+  visit(root);
   while ([' ', '\n'].includes(chars[chars.length - 1])) { chars.pop(); points.pop(); }
   function selector(e) {
     const parts = [];
@@ -52,15 +56,12 @@
     r.setStart(points[a].n, points[a].s); r.setEnd(points[b - 1].n, points[b - 1].e);
     return {r, a, b};
   }
+  let graphemes=null;
   function anchor(a, b) {
-    if (typeof Intl.Segmenter === 'function') {
-      let offset = 0;
-      for (const item of new Intl.Segmenter('ru', {granularity: 'grapheme'}).segment(chars.join(''))) {
-        const end = offset + Array.from(item.segment).length;
-        if (offset < a && a < end) a = offset;
-        if (offset < b && b < end) b = end;
-        offset = end;
-      }
+    if(typeof Intl.Segmenter==='function') {
+      if(!graphemes){graphemes=[0];let offset=0;for(const item of new Intl.Segmenter('ru',{granularity:'grapheme'}).segment(chars.join(''))){offset+=Array.from(item.segment).length;graphemes.push(offset)}}
+      function boundary(value,upper){let lo=0,hi=graphemes.length;while(lo<hi){const m=(lo+hi)>>1;if(graphemes[m]<value)lo=m+1;else hi=m}return graphemes[lo]===value?value:graphemes[upper?lo:Math.max(0,lo-1)]}
+      a=boundary(a,false);b=boundary(b,true);
     }
     const x = range(a, b);
     if (!x) return null;
@@ -76,7 +77,8 @@
     points.forEach((p, i) => {
       if (!p) return;
       // isPointInRange uses native DOM boundary positions, never quote searching.
-      if (r.isPointInRange(p.n, p.s) && r.comparePoint(p.n, p.e) <= 0) {
+      if (r.comparePoint(p.n,p.e)>=0 && r.comparePoint(p.n,p.s)<=0 &&
+          !(r.startContainer===p.n && r.startOffset>=p.e) && !(r.endContainer===p.n && r.endOffset<=p.s)) {
         if (first < 0) first = i; last = i + 1;
       }
     });
@@ -86,14 +88,14 @@
     const s = window.getSelection();
     return s && s.rangeCount && !s.isCollapsed ? fromRange(s.getRangeAt(0)) : null;
   }
-  document.addEventListener('selectionchange', () => {
+  if(sourceChapter===null)document.addEventListener('selectionchange', () => {
     const current = selection();
     if (current) selectionCache = current;
   });
   function context() {
     const p = document.querySelector('p') || document.body;
-    return {documentId, url:document.URL, count:chars.length, nativeReady:typeof window.readium === 'object',
-      fontSize:parseFloat(getComputedStyle(p).fontSize), fontScale:parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--USER__fontSize')) / 100};
+    return {documentId, url:document.URL, sourceChapter,navigationSerial,generation:document.documentElement.getAttribute('data-jj-generation'), count:chars.length, nativeReady:typeof window.readium === 'object',
+      fontReady:!document.fonts || document.fonts.status==='loaded',documentReady:document.readyState!=='loading',resourcesReady:Array.from(document.images).every(i=>i.complete),fontSize:parseFloat(getComputedStyle(p).fontSize), fontScale:parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--USER__fontSize')) / 100};
   }
   function beginSelection(session) { selectionSession=session; selectionCache=selection() || selectionCache; return context(); }
   function takeSelection(session) {
@@ -117,21 +119,24 @@
       return fromRange(r);
     } catch (_) { return null; }
   }
+  const textNodes=new Map();
+  points.forEach((p,i)=>{if(p){if(!textNodes.has(p.n))textNodes.set(p.n,[]);textNodes.get(p.n).push(i)}});
   function visible() {
-    let first = -1, last = -1;
-    const nodes = new Map();
-    points.forEach((p, i) => { if (p) { if (!nodes.has(p.n)) nodes.set(p.n, []); nodes.get(p.n).push(i); } });
-    nodes.forEach((indices, n) => {
-      const r = document.createRange(); r.selectNodeContents(n);
-      if (!Array.from(r.getClientRects()).some(x => x.bottom > 0 && x.top < innerHeight && x.right > 0 && x.left < innerWidth)) return;
-      for (const i of indices) {
-        const p = points[i]; r.setStart(n, p.s); r.setEnd(n, p.e);
-        if (Array.from(r.getClientRects()).some(x => x.width > 0 && x.bottom > 0 && x.top < innerHeight && x.right > 0 && x.left < innerWidth)) {
-          if (first < 0) first = i; last = i + 1;
-        }
-      }
-    });
-    return {first, last, count: chars.length};
+    let first=-1,last=-1;
+    for(const [n,indices] of textNodes) {
+      const r=document.createRange();r.selectNodeContents(n);
+      if(!Array.from(r.getClientRects()).some(x=>x.bottom>0 && x.top<innerHeight && x.right>0 && x.left<innerWidth))continue;
+      const rect=i=>{const p=points[indices[i]];r.setStart(n,p.s);r.setEnd(n,p.e);return r.getBoundingClientRect()};
+      let lo=0,hi=indices.length;
+      while(lo<hi){const mid=(lo+hi)>>1;if(rect(mid).bottom<=0)lo=mid+1;else hi=mid}
+      let start=lo;lo=0;hi=indices.length;
+      while(lo<hi){const mid=(lo+hi)>>1;if(rect(mid).top<innerHeight)lo=mid+1;else hi=mid}
+      let end=lo;
+      const seen=i=>{const x=rect(i);return x.width>0 && x.bottom>0 && x.top<innerHeight && x.right>0 && x.left<innerWidth};
+      while(start<end && !seen(start))start++;while(end>start && !seen(end-1))end--;
+      if(start<end){if(first<0)first=indices[start];last=indices[end-1]+1;}
+    }
+    return {first,last,count:chars.length};
   }
   function rectValue(rect) {
     return rect ? {left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height} : null;
@@ -159,7 +164,10 @@
     if(Math.abs(g.firstRect.top)>1)window.scrollBy(0,g.firstRect.top);
     return true;
   }
-  function go(a,b) { pinned=null;restoreResult=null;return scrollTarget(a,b); }
+  function go(a,b,expectedNavigation=null) {
+    if(expectedNavigation!==null && expectedNavigation!==navigationSerial)return false;
+    pinned=null;restoreResult=null;return scrollTarget(a,b);
+  }
   function viewport() {
     const v=visible(), now=performance.now();
     const key=[innerWidth,innerHeight,scrollY,document.documentElement.scrollHeight].join(':');
@@ -169,7 +177,7 @@
       target=anchor(pinned.a,pinned.b);
     else pinned=null;
     const g=geometry(target ? target.start : 0,target ? target.end : 1);
-    return Object.assign(context(),v,g,{anchor:target,interaction,layoutStable:g.layoutReady && now-viewportSample.since>=32});
+    return Object.assign(context(),v,g,{anchor:target,interaction,restorePinned:!!pinned,layoutStable:g.layoutReady && now-viewportSample.since>=32});
   }
   function requestRestore(id,a,b) {
     pinned=null;
@@ -202,6 +210,63 @@
     return Object.assign(context(),g,{id:q.id,phase:q.phase,reason:q.reason || null,start:q.a,end:q.b,
       layoutStable:q.stable>=2,elapsedMs:now-q.began});
   }
-  window.JJ = {text: chars.join(''), selection, visible, anchor, go, context, viewport, beginSelection, takeSelection, resolveDom,
-    requestRestore, restoreStatus, cancelRestore, geometry};
+  function anchorForId(id) {
+    const element=document.getElementById(id);if(!element || !root.contains(element))return null;
+    const r=document.createRange();r.selectNodeContents(element);const found=fromRange(r);
+    if(found)return anchor(found.start,Math.min(found.start+1,found.end));
+    const next=points.findIndex(p=>p && (element.compareDocumentPosition(p.n)&Node.DOCUMENT_POSITION_FOLLOWING));
+    return next>=0?anchor(next,next+1):null;
+  }
+  function resolveSourceDom(dom) {
+    const copy=JSON.parse(JSON.stringify(dom));
+    for(const key of ['start','end'])if(copy[key]) {
+      const selector=copy[key].cssSelector;
+      const suffix=selector.replace(/^html[^>]*>\s*body[^>]*(?:>\s*)?/,'');
+      copy[key].cssSelector='#'+root.firstElementChild.id+(suffix?' > '+suffix:'');
+    }
+    return resolveDom(copy);
+  }
+  return {text: chars.join(''),selection,visible,anchor,go,context,viewport,beginSelection,takeSelection,resolveDom,resolveSourceDom,
+    requestRestore,restoreStatus,cancelRestore,geometry,fromRange,anchorForId};
+  }
+  if(!wrappers.length) {window.JJ=makeIndex(document.body,null);return;}
+  const indexes=new Map();let active=0,session=null,cached=null,rootPin=null;
+  function forSection(index) {
+    if(!Number.isInteger(index) || !wrappers[index])throw Error('SOURCE_SECTION');
+    active=index;
+    if(indexes.has(index)){const value=indexes.get(index);indexes.delete(index);indexes.set(index,value);return value;}
+    const value=makeIndex(wrappers[index],index);
+    const request=value.requestRestore,go=value.go;
+    value.requestRestore=(...args)=>{rootPin=index;return request(...args)};
+    value.go=(...args)=>{rootPin=null;return go(...args)};
+    indexes.set(index,value);
+    if(indexes.size>8)indexes.delete(Array.from(indexes.keys()).find(i=>i!==rootPin));
+    return value;
+  }
+  function sectionFor(node,offset,end) {
+    if(node.nodeType!==3){node=node.childNodes[Math.min(node.childNodes.length-1,Math.max(0,offset-(end?1:0)))] || node;}
+    const element=node.nodeType===1?node:node.parentElement;
+    return element && element.closest('[data-jj-source]') ? Number(element.closest('[data-jj-source]').getAttribute('data-jj-source')) : -1;
+  }
+  function selection() {
+    const s=getSelection();if(!s || !s.rangeCount || s.isCollapsed)return null;
+    const r=s.getRangeAt(0),a=sectionFor(r.startContainer,r.startOffset,false),b=sectionFor(r.endContainer,r.endOffset,true);
+    if(a<0 || b<0 || a!==b)return {crossSection:true};
+    const anchor=forSection(a).fromRange(r);return anchor?{sourceChapter:a,anchor}:null;
+  }
+  document.addEventListener('selectionchange',()=>{const s=selection();if(s)cached=s;});
+  function viewport() {
+    const candidates=wrappers.map((w,i)=>({i,rect:w.getBoundingClientRect()})).filter(x=>x.rect.bottom>0 && x.rect.top<innerHeight);
+    let first=null,last=null,pin=null;
+    for(const candidate of candidates){const v=forSection(candidate.i).viewport();if(v.first>=0){if(!first)first=v;last=v;if(candidate.i===rootPin && v.restorePinned)pin=v;}}
+    if(!first)return Object.assign(forSection(active).context(),{anchor:null,first:-1,last:-1,sourceChapter:active,lastSourceChapter:active,layoutReady:false,layoutStable:false,shown:false,viewportWidth:innerWidth,viewportHeight:innerHeight});
+    if(!pin)rootPin=null;
+    active=(pin || first).sourceChapter;
+    return Object.assign({},pin || first,{first:first.first,firstSourceChapter:first.sourceChapter,last:last.last,lastSourceChapter:last.sourceChapter});
+  }
+  window.JJ={forSection,viewport,context:()=>forSection(active).context(),anchor:(a,b)=>forSection(active).anchor(a,b),
+    go:(a,b)=>forSection(active).go(a,b),requestRestore:(...args)=>forSection(active).requestRestore(...args),restoreStatus:()=>forSection(active).restoreStatus(),
+    beginSelection:id=>{session=id;cached=selection() || cached;return forSection(active).context()},
+    takeSelection:id=>{if(id!==session)return null;const s=selection() || cached;if(!s)return null;return Object.assign(forSection(s.sourceChapter ?? active).context(),s,{session:id,readiumSelection:!!(window.readium && readium.getCurrentSelection && readium.getCurrentSelection())})},
+    sectionTexts:()=>wrappers.map((_,i)=>forSection(i).text),selection,resolveDom:dom=>forSection(active).resolveSourceDom(dom)};
 })();

@@ -20,6 +20,9 @@ import java.util.UUID
 class StaleReaderOperation : CancellationException("STALE_READER_OPERATION")
 
 internal interface ReaderPort {
+    val continuous: Boolean get()=false
+    fun matches(state:JSONObject,index:Int):Boolean?=null
+    suspend fun context(index:Int):JSONObject?=call("JJ.context()")
     fun chapterIndex(): Int
     suspend fun call(expression: String): JSONObject?
     suspend fun text(): String?
@@ -31,7 +34,7 @@ internal interface ReaderPort {
 /** One book/navigator lifetime. Native start events never overwrite a durable text anchor. */
 class ReaderSession internal constructor(val book: Book, private val data: JSONObject,
                     private val save: () -> Unit, private val port: ReaderPort,
-                    private val trace: ReadingTrace? = null, private val activityId: String = "test") {
+                    private val trace: ReadingTrace? = null, private val activityId: String = "test",private val onUserNavigation:()->Unit={}) {
     constructor(book: Book, notes: NoteStore, nav: EpubNavigatorFragment, bridge: LocatorBridge,
                 goResource: suspend (Int) -> Boolean, trace: ReadingTrace? = null, activityId: String = "test") : this(book, notes.data, { notes.save(NoteStore.Source.SESSION) }, object : ReaderPort {
         override fun chapterIndex() = book.chapters.indexOfFirst { it.href.substringBefore('#') == nav.currentLocator.value.href.toString().substringBefore('#') }
@@ -41,6 +44,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         override suspend fun go(locator: Locator) { nav.go(locator, animated = false) }
         override fun locator(anchor: JSONObject) = bridge.locator(nav.currentLocator.value, anchor)
     }, trace, activityId)
+    internal constructor(book:Book,notes:NoteStore,port:ReaderPort,trace:ReadingTrace?,activityId:String,onUserNavigation:()->Unit={}):this(book,notes.data,{notes.save(NoteStore.Source.SESSION)},port,trace,activityId,onUserNavigation)
     val id = UUID.randomUUID().toString()
     private var source = ReadingTrace.Source.INITIAL
     enum class Phase { NEW, FROZEN, RESTORING, RECOVERING, TRACKING }
@@ -53,7 +57,11 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
     private var activeTarget: Int? = null
     var documentId: String? = null; private set
     private var revision = 0L
+    private var operationBegan=System.nanoTime()
+    internal val currentRevision get()=revision
     private var lastObservedIndex = chapterIndex()
+    private var navigationDocument:String?=null
+    private var navigationSerial=0
     private val verified = mutableSetOf<String>()
     private val hashes = book.chapters.map { TextModel.hash(it.text.toByteArray()) }
     fun chapterIndex() = port.chapterIndex()
@@ -63,8 +71,8 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
                      state: JSONObject? = null, anchor: JSONObject? = null, accepted: Boolean? = null,
                      reason: ReadingTrace.Reason? = null, operation: Long = revision, failure: RestoreCode? = null) {
         trace?.record(event,from,activityId,id,book.id,revision,target,chapterIndex(),
-            state?.optString("url")?.let(::indexOf),state?.optString("documentId") ?: documentId,
-            anchor?.optInt("start"),anchor?.optInt("end"),ready,accepted,reason=reason,operation=operation,failureCode=failure,requestId=activeRequest,geometry=state,sessionPhase=phase.name)
+            if(port.continuous)null else state?.optString("url")?.let(::indexOf),state?.optString("documentId") ?: documentId,
+            anchor?.optInt("start"),anchor?.optInt("end"),ready,accepted,reason=reason,operation=operation,failureCode=failure,requestId=activeRequest,geometry=state,sessionPhase=phase.name,durationMs=(System.nanoTime()-operationBegan)/1_000_000,renderedResource=if(port.continuous)0 else chapterIndex(),sourceSection=state?.optInt("sourceChapter")?.takeIf{port.continuous})
     }
     internal fun requireCurrent(operation: Long) = guard(operation)
     private fun guard(operation: Long) {
@@ -74,35 +82,44 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
     private fun positiveViewport(state: JSONObject) = listOf("viewportWidth","viewportHeight").all {
         state.optDouble(it,Double.NaN).let{value->value.isFinite() && value>0}
     }
+    private fun matchesState(state:JSONObject,index:Int)=port.matches(state,index) ?: (chapterIndex()==index && matches(state.optString("url"),index))
     private fun matches(url: String, index: Int): Boolean =
         Uri.parse(url).path?.trimStart('/') == Uri.parse(book.chapters[index].href).path?.trimStart('/')
-    suspend fun context(expected: Int = chapterIndex(), operation: Long = revision): JSONObject = withTimeout(12000) {
+    suspend fun context(expected: Int = chapterIndex(), operation: Long = revision): JSONObject = if(port.continuous)contextBody(expected,operation) else withTimeout(12000){contextBody(expected,operation)}
+    private suspend fun contextBody(expected:Int,operation:Long):JSONObject {
         require(expected in book.chapters.indices)
         while (true) {
             afterAwait(operation)
-            val state = port.call("JJ.context()")
+            val state = port.context(expected)
             afterAwait(operation)
-            emit(ReadingTrace.Event.DOM,target=expected,state=state,accepted=state!=null && chapterIndex()==expected && matches(state.getString("url"),expected),operation=operation)
-            if (state != null && chapterIndex() == expected && matches(state.getString("url"), expected)) {
+            emit(ReadingTrace.Event.DOM,target=expected,state=state,accepted=state!=null && matchesState(state,expected),operation=operation)
+            if (state != null && matchesState(state,expected)) {
+                if(port.continuous && (!state.optBoolean("documentReady",true) || !state.optBoolean("fontReady",true) || !state.optBoolean("resourcesReady",true))) { delay(50);continue }
                 check(state.getBoolean("nativeReady")) { "READIUM_SCRIPT_MISSING" }
                 val id = state.getString("documentId")
-                if (id !in verified) {
+                if(port.continuous){
+                    if(navigationDocument!=id){navigationDocument=id;navigationSerial=0}
+                    val serial=state.optInt("navigationSerial")
+                    if(serial!=navigationSerial){navigationSerial=serial;userNavigation();onUserNavigation();throw StaleReaderOperation()}
+                }
+                val verification="$id:$expected"
+                if (verification !in verified) {
                     val text = port.text(); afterAwait(operation)
                     check(text == book.chapters[expected].text) { "DOM_MODEL_MISMATCH" }
-                    val after = port.call("JJ.context()")
+                    val after = port.context(expected)
                     afterAwait(operation)
-                    if (after?.optString("documentId") != id || chapterIndex() != expected || !matches(after.getString("url"), expected)) continue
-                    verified += id
+                    if (after?.optString("documentId") != id || !matchesState(after,expected)) continue
+                    verified += verification
                 }
                 documentId = id
-                return@withTimeout state
+                return state
             }
             delay(50)
         }
         @Suppress("UNREACHABLE_CODE") error("DOM_NOT_READY")
     }
     fun freeze(from: ReadingTrace.Source = source): Long {
-        source = from; revision++; phase = Phase.FROZEN; activeRequest = null; activeTarget = null
+        source = from; revision++;operationBegan=System.nanoTime(); phase = Phase.FROZEN; activeRequest = null; activeTarget = null
         emit(ReadingTrace.Event.FREEZE); return revision
     }
     /** Supersede a failed/pending initial target when the reader moves, never replay it on resume. */
@@ -113,7 +130,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
     }
     fun observeResource() {
         val observed=chapterIndex();val previous=lastObservedIndex;lastObservedIndex=observed
-        if(phase==Phase.RESTORING && observed>=0 && observed!=previous && observed!=activeTarget)userNavigation()
+        if(!port.continuous && phase==Phase.RESTORING && observed>=0 && observed!=previous && observed!=activeTarget)userNavigation()
     }
     fun preparePause() {
         if (phase == Phase.RESTORING || (phase == Phase.FROZEN && source == ReadingTrace.Source.FONT)) {
@@ -168,7 +185,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             if (saved != null) {
                 val index = saved.getInt("chapter")
                 validate(saved, index)
-                if (chapterIndex() >= 0 && chapterIndex() != index) {
+                if (port.continuous || (chapterIndex() >= 0 && chapterIndex() != index)) {
                     emit(ReadingTrace.Event.GO,target=index)
                     val accepted = port.goResource(index); afterAwait(operation)
                     emit(ReadingTrace.Event.GO,target=index,accepted=accepted)
@@ -264,7 +281,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
                     afterAwait(operation); last = result
                     if(result != null) {
                         if(result.optString("id") != request || result.optString("documentId") != state.getString("documentId") ||
-                            chapterIndex() != index || !matches(result.optString("url"),index))throw RestoreFailure(RestoreCode.STALE_DOM)
+                            !matchesState(result,index))throw RestoreFailure(RestoreCode.STALE_DOM)
                         emit(ReadingTrace.Event.ACK_WAIT,target=index,state=result,anchor=anchor)
                         when(result.optString("phase")) {
                             "confirmed" -> {
@@ -310,10 +327,14 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
     suspend fun capture(): JSONObject? {
         if (phase != Phase.TRACKING && phase != Phase.RECOVERING) { emit(ReadingTrace.Event.REJECT,ReadingTrace.Source.CAPTURE,reason=ReadingTrace.Reason.NOT_READY); return null }
         val operation = revision
-        val index = chapterIndex(); val state = context(index, operation)
-        val snap = port.call("JJ.viewport()") ?: run { emit(ReadingTrace.Event.REJECT,ReadingTrace.Source.CAPTURE,reason=ReadingTrace.Reason.NULL_RESULT); return null }
+        var index=chapterIndex();var state=context(index,operation)
+        var snap=port.call("JJ.viewport()") ?: run{emit(ReadingTrace.Event.REJECT,ReadingTrace.Source.CAPTURE,reason=ReadingTrace.Reason.NULL_RESULT);return null}
         afterAwait(operation)
-        if (revision != operation || chapterIndex() != index || snap.optString("documentId") != state.getString("documentId") || !matches(snap.optString("url"),index)) return null
+        if(port.continuous && snap.has("sourceChapter") && snap.getInt("sourceChapter")!=index) {
+            index=snap.getInt("sourceChapter");state=context(index,operation)
+            snap=port.call("JJ.viewport()") ?: return null;afterAwait(operation)
+        }
+        if(revision!=operation || snap.optString("documentId")!=state.getString("documentId") || !matchesState(snap,index))return null
         if(!snap.optBoolean("layoutReady") || !snap.optBoolean("layoutStable") || !positiveViewport(snap) || !snap.optBoolean("shown")) {
             emit(ReadingTrace.Event.REJECT,ReadingTrace.Source.CAPTURE,state=snap,failure=RestoreCode.LAYOUT_UNSTABLE);return null
         }
@@ -329,8 +350,10 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         // This is the first await in the menu action: one DOM evaluation captures everything.
         val snap = port.call("JJ.takeSelection(${JSONObject.quote(session)})") ?: error("SELECTION_EMPTY")
         afterAwait(operation)
-        val index = chapterIndex()
-        check(ready && snap.getString("documentId") == documentId && matches(snap.getString("url"), index)) { "SELECTION_STALE" }
+        if(snap.optBoolean("crossSection"))error("Пометка должна находиться внутри одного исходного раздела.")
+        val index = if(port.continuous)snap.getInt("sourceChapter")else chapterIndex()
+        if(port.continuous)context(index,operation)
+        check(ready && snap.getString("documentId") == documentId && matchesState(snap,index)) { "SELECTION_STALE" }
         check(snap.getString("session") == session) { "SELECTION_SESSION" }
         val anchor = snap.getJSONObject("anchor")
         validate(anchor, index)
