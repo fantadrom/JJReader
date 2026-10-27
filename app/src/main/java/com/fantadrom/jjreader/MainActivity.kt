@@ -252,8 +252,17 @@ open class MainActivity : AppCompatActivity() {
         when(action.optString("kind")){
             "brightness"->{val gesture=action.optString("gesture");if(brightnessGesture!=gesture){brightnessGesture=gesture;brightnessBase=effectiveBrightness()};setBrightness(brightnessBase+action.optDouble("delta").toFloat());if(action.optBoolean("end"))appearance.edit { putFloat("brightness",effectiveBrightness()) }}
             "panels"->togglePanels()
-            "page"->{val nav=navigator ?: return;val reader=session ?: return;stopManualNavigation();reader.userNavigation();navigationJob=lifecycleScope.launch{try{val step=bridge.installedCall(nav,"JJ.pageStep(${action.getInt("direction")})");val delta=step?.optInt("resource",0) ?: 0;if(delta!=0)navigateSection(reader.chapterIndex()+delta,delta<0,SectionNavigation.Initiator.TAP)}catch(e:Exception){handle(e)}}}
-            "edge"->{val reader=session ?: return;val direction=action.optInt("direction");val target=reader.chapterIndex()+direction;if(target in checkNotNull(book).chapters.indices)navigateSection(target,direction<0,SectionNavigation.Initiator.GESTURE)else navigator?.let{nav->lifecycleScope.launch{bridge.installedCall(nav,"JJ.edgeComplete()")}}}
+            "page"->{val nav=navigator ?: return;val reader=session ?: return;val controller=sectionNavigation ?: return
+                stopManualNavigation();reader.userNavigation()
+                navigationJob=lifecycleScope.launch{try{
+                    val step=bridge.installedCall(nav,"JJ.pageStep(${action.getInt("direction")})") ?: return@launch
+                    currentCoroutineContext().ensureActive();if(session!==reader || step.optString("documentId")!=reader.documentId)throw StaleReaderOperation()
+                    reader.tracePageStep(step)
+                    val delta=step.optInt("resource",0);val target=reader.chapterIndex()+delta
+                    if(delta!=0 && target in reader.book.chapters.indices){val placement=if(delta>0)BoundaryPlacement.RESOURCE_START else BoundaryPlacement.END_PAGE;controller.boundary(target,placement,SectionNavigation.Initiator.TAP,step)}
+                }catch(e:Exception){handle(e)}finally{withContext(NonCancellable){withTimeoutOrNull(500){bridge.installedCall(nav,"JJ.edgeComplete()")}}}}
+            }
+            "edge"->{val reader=session ?: return;val direction=action.optInt("direction");val target=reader.chapterIndex()+direction;if(target in checkNotNull(book).chapters.indices)navigateSection(target,if(direction<0)BoundaryPlacement.END_TOP else BoundaryPlacement.RESOURCE_START,SectionNavigation.Initiator.GESTURE)else navigator?.let{nav->lifecycleScope.launch{bridge.installedCall(nav,"JJ.edgeComplete()")}}}
         }
     }
     private fun buildPrototypeUi() {
@@ -537,7 +546,7 @@ open class MainActivity : AppCompatActivity() {
                             }else {
                                 val edge=bridge.installedCall(nav,"JJ.takeEdge()")
                                 if(edge!=null && edge.optString("documentId")==reader.documentId){val target=reader.chapterIndex()+if(edge.optString("direction")=="next")1 else -1
-                                    if(target in value.chapters.indices)navigateSection(target,edge.optString("direction")=="previous",SectionNavigation.Initiator.GESTURE)else bridge.installedCall(nav,"JJ.edgeComplete()")}
+                                    if(target in value.chapters.indices)navigateSection(target,if(edge.optString("direction")=="previous")BoundaryPlacement.END_TOP else BoundaryPlacement.RESOURCE_START,SectionNavigation.Initiator.GESTURE)else bridge.installedCall(nav,"JJ.edgeComplete()")}
                             }
                         }
                         }catch(e:Exception){if(e is CancellationException)throw e;handle(e)}
@@ -594,23 +603,24 @@ open class MainActivity : AppCompatActivity() {
         }
     }
     private fun chapterIndex(nav: EpubNavigatorFragment) = session?.chapterIndex() ?: -1
-    private fun changeResource(delta:Int){val reader=session ?: return;navigateSection(reader.chapterIndex()+delta,false,SectionNavigation.Initiator.BUTTON)}
-    private fun navigateSection(index:Int,end:Boolean=false,initiator:SectionNavigation.Initiator=SectionNavigation.Initiator.TOC,targetId:String?=null) {
+    private fun changeResource(delta:Int){val reader=session ?: return;navigateSection(reader.chapterIndex()+delta,initiator=SectionNavigation.Initiator.BUTTON)}
+    private fun navigateSection(index:Int,placement:BoundaryPlacement=BoundaryPlacement.RESOURCE_START,initiator:SectionNavigation.Initiator=SectionNavigation.Initiator.TOC,targetId:String?=null) {
         val adapter=rendition ?: return;val nav=navigator ?: return;val reader=session ?: return;val controller=sectionNavigation ?: return
         if(busy || index !in adapter.book.chapters.indices)return
         stopManualNavigation()
         navigationJob=lifecycleScope.launch {
             try {
                 if(initiator==SectionNavigation.Initiator.TOC)rememberPlace()
-                controller.run(initiator,index,end){
+                val resourceEntry=targetId?.substringAfter('#',"").isNullOrEmpty()
+                controller.run(initiator,index,if(resourceEntry)placement else null){
                     if(adapter.unified!=null){
                         val (actual,offset)=adapter.boundary(index) ?: error("NO_TEXT")
                         val anchor=targetId?.let{bridge.call(nav,"JJ.forSection($actual).anchorForId(${JSONObject.quote(it)})")} ?: adapter.anchor(bridge,nav,actual,offset,offset+1)
                         anchor.put("chapter",actual);reader.navigateTo(anchor)
-                    }else if(targetId!=null){
+                    }else if(!resourceEntry && targetId!=null){
                         val link=checkNotNull(org.readium.r2.shared.publication.Link.fromJSON(JSONObject().put("href",targetId).put("type","application/xhtml+xml")))
                         val locator=checkNotNull(publication?.locatorFromLink(link));reader.confirmLink(index,locator)
-                    }else reader.navigateBoundary(index,end,ReadingTrace.Source.NATIVE)
+                    }else reader.navigateBoundary(index,placement,ReadingTrace.Source.NATIVE)
                 }
             }catch(e:Exception){handle(e)}
         }

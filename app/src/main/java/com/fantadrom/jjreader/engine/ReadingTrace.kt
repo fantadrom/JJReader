@@ -9,7 +9,7 @@ import java.util.UUID
 
 /** Bounded local trace, shared across Activity/process recreation. No free-form strings or payloads. */
 class ReadingTrace(private val file: File) {
-    enum class Event { CREATE, PAUSE, DESTROY, STORE_LOAD, STORE_WRITE, INITIAL, READY, FREEZE, GO, DOM, RESTORE_REQUEST, ACK_WAIT, ACK, RECOVERY, FALLBACK, COMMIT, CAPTURE, REJECT, NATIVE, DIALOG }
+    enum class Event { CREATE, PAUSE, DESTROY, STORE_LOAD, STORE_WRITE, INITIAL, READY, FREEZE, GO, DOM, RESTORE_REQUEST, ACK_WAIT, ACK, RECOVERY, FALLBACK, COMMIT, CAPTURE, REJECT, NATIVE, DIALOG, PAGE_STEP }
     enum class Source { LIFECYCLE, INITIAL, NOTE, CAPTURE, RESTORE, FONT, IME, NATIVE, NOTES, ACTIVITY, SESSION, DIAGNOSTIC }
     enum class Reason { STALE, CANCELLED, NOT_READY, NO_ANCHOR, NULL_RESULT, RESOURCE_MISMATCH, DOM_MISMATCH, WRITE_READ_MISMATCH, ERROR, OPEN, CLOSE }
     fun begin() = synchronized(file.absolutePath.intern()) { runCatching { BookStore.writeAtomic(file, empty()) }; Unit }
@@ -27,10 +27,10 @@ class ReadingTrace(private val file: File) {
     }
     private fun safeGeometry(value: JSONObject): JSONObject {
         val output=JSONObject()
-        for(key in listOf("viewportWidth","viewportHeight","scrollY","firstOffset")) {
+        for(key in listOf("viewportWidth","viewportHeight","scrollY","firstOffset","lineHeight","freeBelow","contentTop","contentBottom","entryGap","resource")) {
             val number=value.optDouble(key,Double.NaN);if(number.isFinite())output.put(key,kotlin.math.round(number*100)/100)
         }
-        for(key in listOf("layoutReady","layoutStable","shown","fontReady","documentReady"))
+        for(key in listOf("layoutReady","layoutStable","shown","fontReady","documentReady","tapAtStart","tapAtEnd","contentStartVisible","contentEndVisible"))
             if(value.opt(key) is Boolean)output.put(key,value.getBoolean(key))
         for(key in listOf("firstRect","rangeRect"))value.optJSONObject(key)?.let{rect->
             val safe=JSONObject();for(field in listOf("left","top","right","bottom","width","height")){
@@ -38,6 +38,7 @@ class ReadingTrace(private val file: File) {
             };output.put(key,safe)
         }
         value.optString("phase").takeIf{it in setOf("pending","layout_wait","confirmed","failed")}?.let{output.put("phase",it)}
+        value.optString("placement").takeIf{it in setOf("RESOURCE_START","END_PAGE","ANCHOR")}?.let{output.put("placement",it)}
         return output
     }
     fun record(event: Event, source: Source, activity: String, session: String? = null, book: String? = null,

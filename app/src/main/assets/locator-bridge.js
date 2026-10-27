@@ -168,46 +168,53 @@
     if(expectedNavigation!==null && expectedNavigation!==navigationSerial)return false;
     pinned=null;restoreResult=null;return scrollTarget(a,b);
   }
-  // A chrome/brightness contact must not turn a confirmed mid-line point into line start.
-  function beginUiContact(){uiPin=pinned && Math.abs(scrollY-pinned.scrollY)<1 && geometry(pinned.a,pinned.b).shown?{...pinned}:null;return {ok:!!uiPin}}
-  function commitUiContact(){if(uiPin && Math.abs(scrollY-uiPin.scrollY)<1 && geometry(uiPin.a,uiPin.b).shown)pinned={...uiPin,interaction};uiPin=null;return {ok:true}}
+  function pinShown(pin){return pin.placement?!!JJ.boundaryGeometry?.(pin.placement.kind).shown:geometry(pin.a,pin.b).shown}
+  // Chrome/brightness preserves a confirmed placement; scrolling and selection release it.
+  function beginUiContact(){uiPin=pinned && Math.abs(scrollY-pinned.scrollY)<1 && pinShown(pinned)?{...pinned}:null;return {ok:!!uiPin}}
+  function commitUiContact(){if(uiPin && Math.abs(scrollY-uiPin.scrollY)<1 && pinShown(uiPin))pinned={...uiPin,interaction};uiPin=null;return {ok:true}}
   function cancelUiContact(){uiPin=null;return {ok:true}}
+  function cancelPlacement(){pinned=null;uiPin=null;restoreResult=null;return {ok:true}}
+  function targetGeometry(q,move=false){
+    if(q.placement&&JJ.boundaryGeometry)return {...geometry(q.a,q.b),...JJ.boundaryGeometry(q.placement.kind,move)};
+    if(move)scrollTarget(q.a,q.b);
+    return {...geometry(q.a,q.b),placement:'ANCHOR'};
+  }
   function viewport() {
     const v=visible(), now=performance.now();
     const key=[innerWidth,innerHeight,scrollY,document.documentElement.scrollHeight].join(':');
     if (!viewportSample || viewportSample.key!==key) viewportSample={key,since:now};
     let target=v.first>=0 ? anchor(v.first,v.first+1) : null;
-    if(pinned && pinned.interaction===interaction && Math.abs(scrollY-pinned.scrollY)<1 && geometry(pinned.a,pinned.b).shown)
+    if(pinned && pinned.interaction===interaction && Math.abs(scrollY-pinned.scrollY)<1 && pinShown(pinned))
       target=anchor(pinned.a,pinned.b);
     else pinned=null;
     const g=geometry(target ? target.start : 0,target ? target.end : 1);
-    return Object.assign(context(),v,g,{anchor:target,interaction,restorePinned:!!pinned,layoutStable:g.layoutReady && now-viewportSample.since>=32});
+    return Object.assign(context(),v,g,pinned?.placement?JJ.boundaryGeometry(pinned.placement.kind):{},{entryPlacement:pinned?.placement,anchor:target,interaction,restorePinned:!!pinned,layoutStable:g.layoutReady && now-viewportSample.since>=32});
   }
-  function requestRestore(id,a,b) {
+  function requestRestore(id,a,b,placement=null) {
     pinned=null;
     if (!range(a,b)) { restoreResult=null;return false; }
-    restoreResult={id,a,b,phase:'pending',began:performance.now(),interaction,sample:null,stable:0};
-    scrollTarget(a,b); // Start immediately when layout permits; ACK still requires stable polling.
+    restoreResult={id,a,b,placement:placement?.schema===1&&['RESOURCE_START','END_PAGE'].includes(placement.kind)?placement:null,phase:'pending',began:performance.now(),interaction,sample:null,stable:0};
+    targetGeometry(restoreResult,true); // Start immediately when layout permits; ACK still requires stable polling.
     return true; // Accepted request, not a visibility acknowledgement.
   }
   function cancelRestore(id) { if(restoreResult && restoreResult.id===id)restoreResult=null; }
   function restoreStatus() {
     const q=restoreResult;if(!q)return null;
-    const now=performance.now();let g=geometry(q.a,q.b);
+    const now=performance.now();let g=targetGeometry(q);
     if(q.phase==='pending' || q.phase==='layout_wait') {
       if(q.interaction!==interaction) {q.phase='failed';q.reason='RESTORE_INTERRUPTED';}
       else if(now-q.began>=4000) {
         q.phase='failed';q.reason=!g.layoutReady?'LAYOUT_TIMEOUT':!g.shown?'ANCHOR_NOT_VISIBLE':'LAYOUT_UNSTABLE';
       } else if(!g.layoutReady || !g.firstRect) {q.phase='layout_wait';q.stable=0;q.sample=null;}
       else {
-        scrollTarget(q.a,q.b);g=geometry(q.a,q.b);
+        g=targetGeometry(q,true);
         const key=[g.viewportWidth,g.viewportHeight,g.scrollY,document.documentElement.scrollHeight,
           ...Object.values(g.firstRect || {}).map(x=>Math.round(x*2)/2)].join(':');
         if(!q.sample || q.sample.key!==key) {q.sample={key,time:now};q.stable=0;}
         else if(now-q.sample.time>=32) {q.sample.time=now;q.stable++;}
         q.phase='pending';
         if(g.shown && q.stable>=2) {
-          q.phase='confirmed';pinned={a:q.a,b:q.b,interaction,scrollY};
+          q.phase='confirmed';pinned={a:q.a,b:q.b,placement:q.placement,interaction,scrollY};
         }
       }
     }
@@ -231,7 +238,7 @@
     return resolveDom(copy);
   }
   return {text: chars.join(''),selection,visible,anchor,go,context,viewport,beginSelection,takeSelection,resolveDom,resolveSourceDom,
-    requestRestore,restoreStatus,cancelRestore,geometry,fromRange,anchorForId,beginUiContact,commitUiContact,cancelUiContact};
+    requestRestore,restoreStatus,cancelRestore,geometry,fromRange,anchorForId,beginUiContact,commitUiContact,cancelUiContact,cancelPlacement,interactionState:()=>interaction};
   }
   if(!wrappers.length) {window.JJ=makeIndex(document.body,null);return;}
   const indexes=new Map();let active=0,session=null,cached=null,rootPin=null;

@@ -19,7 +19,7 @@ import java.util.UUID
 class SectionRenderingTest {
     @Test fun actualReadiumSourceDocumentsAndComparableUnifiedOutput()=runBlocking {
         val engine=ReadiumEngine(RuntimeEnvironment.getApplication())
-        val fixtures=mutableListOf("small" to File("src/test/resources/sections/p08-sections.epub"))
+        val fixtures=mutableListOf("small" to File("src/test/resources/sections/p08-sections.epub"),"tap" to File("src/test/resources/sections/p11-taps.epub"))
         if(System.getProperty("jj.sectionBenchmark")=="true")fixtures+="3m" to File("../work/unified-fixtures/3m.epub")
         for((label,file) in fixtures){
             val out=File("build/section-regression/$label").apply{mkdirs()};val source=engine.open(file.absoluteFile)

@@ -21,7 +21,15 @@ class RenditionAdapter(val book:Book,val unified:UnifiedDocument?=null,val secti
         return index to absolute-prefixes[index]
     }
     fun nextReadable(chapter:Int)= (chapter until lengths.size).firstOrNull{lengths[it]>0} ?: (chapter downTo 0).firstOrNull{lengths[it]>0}
-    fun initialLocator(data:JSONObject):Locator? = if(unified!=null)Locator.fromJSON(JSONObject().put("href",UnifiedDocument.HREF).put("type","application/xhtml+xml")) else data.optJSONObject("locator")?.let(Locator::fromJSON)
+    fun initialLocator(data:JSONObject):Locator? {
+        if(unified!=null)return Locator.fromJSON(JSONObject().put("href",UnifiedDocument.HREF).put("type","application/xhtml+xml"))
+        val position=if(data.optString("positionKind")=="visual")data.optJSONObject("visualPosition")else data.optJSONObject("positionV2")
+        val index=position?.optInt("chapter",-1) ?: -1
+        // A semantic entry must not first flash the text-quote locator at a different placement.
+        if(sections && index in book.chapters.indices && BoundaryPlacement.read(position?.optJSONObject("entryPlacement"))!=null)
+            return Locator.fromJSON(JSONObject().put("href",book.chapters[index].href).put("type","application/xhtml+xml"))
+        return data.optJSONObject("locator")?.let(Locator::fromJSON)
+    }
     fun sourceLocator(chapter:Int,anchor:JSONObject):Locator {
         val locations=anchor.optJSONObject("locations")?.let{JSONObject(it.toString())} ?: JSONObject().put("progression",if(lengths[chapter]==0)0.0 else anchor.getInt("start").toDouble()/lengths[chapter])
         fun original(selector:String)=selector.replace(Regex("^(html[^>]*>\\s*body[^>]*)(?:>\\s*section[^>]*>\\s*div[^>]*)(?=>|$)"),"$1")
