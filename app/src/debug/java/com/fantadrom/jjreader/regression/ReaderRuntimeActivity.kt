@@ -6,6 +6,7 @@ import java.io.File
 
 /** Actual P0 UI/controller with an isolated per-test files/cache/prefs namespace. */
 class ReaderRuntimeActivity : MainActivity() {
+    override val prototypeControls get()=!intent.getBooleanExtra("p1Ui",false)
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         val prefs=getSharedPreferences("reader",MODE_PRIVATE)
         if(!prefs.contains("testInitialized"))prefs.edit().putBoolean("testInitialized",true).putInt("modeSchema",1).putString("mode",intent.getStringExtra("mode") ?: if(intent.getBooleanExtra("unified",false))"unified"else"legacy").commit()

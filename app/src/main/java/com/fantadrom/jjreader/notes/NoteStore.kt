@@ -12,7 +12,7 @@ class NoteStore(context: Context, bookId: String) {
     val instanceId = java.util.UUID.randomUUID().toString()
     var onSaved: ((Source, JSONObject, JSONObject?) -> Unit)? = null
     private val file = File(context.filesDir, "books-v1/$bookId/reader.json")
-    val data = if (file.exists()) BookStore.readAtomic(file).also {
+    val data = if (file.exists() || File(file.path+".bak").exists()) BookStore.readAtomic(file).also {
         require(it.getInt("schema") == 1) { "Неизвестная версия пометок" }
     } else JSONObject().put("schema", 1).put("notes", JSONArray()).put("fontSize", 1.0)
     init {

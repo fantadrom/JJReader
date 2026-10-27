@@ -60,6 +60,13 @@ class ResourceDiagnosticsTest {
         assertEquals("absent",EdgeProtocol.response(emptyMap(),"{\"context\":{}}").status)
         assertEquals("success",EdgeProtocol.response(emptyMap(),"{\"status\":\"Success\"}").status)
     }
+    @Test fun staleCloseStageCannotDowngradeCompletedPlayback() {
+        val diagnostics=SpeechDiagnostics();diagnostics.beginRun(1)
+        val attempt=diagnostics.attempt(Voice.DMITRY,"network",block=1)
+        attempt.record("playback");attempt.record("completed");attempt.record("playback",close=1000)
+        val row=JSONObject(diagnostics.text()).getJSONArray("attempts").getJSONObject(0)
+        assertEquals("completed",row.getString("playback"));assertEquals("completed",row.getString("stage"));assertEquals(1000,row.getInt("webSocketCloseCode"))
+    }
     @Test fun routeComparisonMakesFourSequentialUncachedRequestsWithSameProfileAndNoFallback() = runBlocking {
         val servers=listOf(MockWebServer(),MockWebServer());servers.forEach{it.start()}
         val clients=servers.mapIndexed{i,s->EdgeClient(s.url("/edge").toString(),route=EdgeRoute.entries[i])}

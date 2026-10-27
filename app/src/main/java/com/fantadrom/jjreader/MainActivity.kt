@@ -8,6 +8,7 @@ import android.view.*
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.edit
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.appcompat.app.AppCompatActivity
@@ -24,10 +25,15 @@ import org.readium.r2.navigator.*
 import org.readium.r2.navigator.epub.*
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
+import com.fantadrom.jjreader.ui.*
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatDelegate
+import org.readium.r2.navigator.preferences.FontFamily
+import org.readium.r2.navigator.preferences.Theme
 import java.util.UUID
 import kotlin.coroutines.resume
 
-/** P0 laboratory. The original Compose theme is retained for the next stage. */
+/** P1 shell and book lifetimes around the accepted stable Readium engine. */
 open class MainActivity : AppCompatActivity() {
     private lateinit var readingTrace: ReadingTrace
     private val activityId = UUID.randomUUID().toString()
@@ -49,6 +55,16 @@ open class MainActivity : AppCompatActivity() {
     private var decorationJob:Job?=null
     private var resizeJob: Job? = null
     private var navigationJob: Job? = null
+    protected open val prototypeControls:Boolean get()=false
+    private var shell:ReaderShell?=null
+    private val appearance by lazy{getSharedPreferences("appearance",MODE_PRIVATE)}
+    private val sourceFolder by lazy{SourceFolder(this)}
+    private var shelfJob:Job?=null
+    private var folderJob:Job?=null
+    private var scrubJob:Job?=null
+    private var scrubbing=false
+    private var brightnessGesture:String?=null
+    private var brightnessBase=.5f
     private var busy = false
     private var voice = Voice.DMITRY
     private var verifiedHref: String? = null
@@ -67,32 +83,189 @@ open class MainActivity : AppCompatActivity() {
     private var speechNavigationSerial=0
     private var selectionConfirmed=false
     protected open fun localSpeechAudio(phrase:Phrase):java.io.File?=null
+    internal fun shelfForTests()=showShelf()
+    internal fun panelsForTests()=togglePanels()
+    internal fun seekForTests(value:Int){rememberPlace();seekWholeBook(value)}
+    internal fun returnForTests()=returnToPlace()
     internal fun startSpeechForTests()=startSpeech()
     internal suspend fun highlightForTests(phrase:Phrase?)=highlightPhrase(phrase)
     internal fun readerSessionForTests() = session?.takeIf{selectionConfirmed}
     internal fun commentEditorVisibleForTests() = editor?.isShowing == true
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if(uri==null)libraryEvent("CANCELLED") else if(!busy)importBook{store.stage(uri)}
+        if(uri==null)libraryEvent("CANCELLED") else if(!busy)importBook({store.stage(uri)},uri)
+    }
+    private val pickFolder=registerForActivityResult(ActivityResultContracts.OpenDocumentTree()){tree->
+        if(tree!=null){val retained=sourceFolder.remember(tree);if(!retained)Toast.makeText(this,"Разрешение не сохранено: после перезапуска папку может потребоваться выбрать снова",Toast.LENGTH_LONG).show();browseFolder(tree)}
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         // A Readium Fragment needs its Publication before restoration. Rebuild from the durable
         // locator rather than asking FragmentManager to restore an unbound navigator.
+        delegate.localNightMode=when(appearance.getString("theme","auto")){"dark"->AppCompatDelegate.MODE_NIGHT_YES;"light"->AppCompatDelegate.MODE_NIGHT_NO;else->AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM}
         super.onCreate(null)
         readingTrace = ReadingTrace(java.io.File(filesDir,"reading-last-session.json"))
         readingTrace.record(ReadingTrace.Event.CREATE,ReadingTrace.Source.LIFECYCLE,activityId)
         store = BookStore(this); engine = ReadiumEngine(this); bridge = LocatorBridge(this)
         ReadingMode.current(getSharedPreferences("reader",MODE_PRIVATE))
-        buildUi()
+        if(prototypeControls)buildPrototypeUi()else buildReaderUi()
         player = PhrasePlayer(this, lifecycleScope, { highlightPhrase(it) }, { status.text = it }, { localSpeechAudio(it) })
         busy=true
         openingJob=lifecycleScope.launch {
             try {
                 val previous = withContext(Dispatchers.IO) { store.current() }
-                if (previous != null) load(previous) else status.text = "Откройте EPUB или пример. Это прототип P0."
-            } catch (e: Exception) { handle(e) }finally{busy=false}
+                if (previous != null) load(previous) else if(prototypeControls)status.text="Откройте EPUB или пример. Это прототип P0."else {busy=false;showShelf()}
+            } catch (e: Exception) { handle(e);if(!prototypeControls){busy=false;showShelf("Последняя книга недоступна. Внутренние копии и пометки не удалены.")} }finally{busy=false}
         }
     }
-    private fun buildUi() {
+    private fun buildReaderUi() {
+        val view=ReaderShell(this,READER_ID,::showReaderMenu,{showShelf()},::returnToPlace,::openSourceFolder,
+            {if(!busy)openDocument.launch(arrayOf("application/epub+zip","application/octet-stream"))},
+            {if(!busy)importBook({store.stage(assets.open("p0-sample.epub"))},sourceLabel="Пример P0.epub")},
+            {if(book!=null){shell?.showReader();window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)}},::selectShelfBook,::manageBook)
+        shell=view;heading=view.heading;progress=view.progress;status=view.status
+        notesButton=button("Пометки · 0"){showNotes()}
+        view.setPanels(appearance.getBoolean("panels",true));val dark=Appearance.dark(appearance,resources.configuration);view.theme(dark)
+        window.attributes=window.attributes.apply{screenBrightness=appearance.getFloat("brightness",-1f).let{if(it<0)-1f else Appearance.brightness(it)}}
+        ViewCompat.setOnApplyWindowInsetsListener(view.root){root,insets->val bars=insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime());root.setPadding(bars.left,bars.top,bars.right,bars.bottom);insets}
+        view.slider.setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seek:SeekBar){scrubbing=true;stopManualNavigation();rememberPlace()}
+            override fun onProgressChanged(seek:SeekBar,value:Int,user:Boolean){if(user){progress.text="${value/100}%";scrubJob?.cancel();scrubJob=lifecycleScope.launch{delay(140);seekWholeBook(value)}}}
+            override fun onStopTrackingTouch(seek:SeekBar){scrubJob?.cancel();scrubbing=false;seekWholeBook(seek.progress)}
+        })
+        onBackPressedDispatcher.addCallback(this,object:OnBackPressedCallback(true){override fun handleOnBackPressed(){if(view.onShelf)finish()else showShelf()}})
+        setContentView(view.root)
+        androidx.core.view.WindowCompat.getInsetsController(window,window.decorView).apply{isAppearanceLightStatusBars=!dark;isAppearanceLightNavigationBars=!dark}
+    }
+    private fun showShelf(message:String="") {
+        if(prototypeControls){showBooks();return}
+        if(busy){status.text="Дождитесь открытия книги";return}
+        shelfJob?.cancel();folderJob?.cancel();player.pause();scrubJob?.cancel();navigationJob?.cancel();resizeJob?.cancel()
+        shelfJob=lifecycleScope.launch {
+            try{navigator?.let{updateViewport(it)};val entries=withContext(Dispatchers.IO){store.entries()};shell?.shelf(entries,message);shell?.bookAvailable(book!=null);shell?.theme(Appearance.dark(appearance,resources.configuration));window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)}catch(e:Exception){handle(e)}
+        }
+    }
+    private fun selectShelfBook(entry:BookEntry){
+        if(busy)return
+        if(!entry.available){AlertDialog.Builder(this).setTitle("Копия недоступна").setMessage("Не удалось прочитать данные этой копии. Другие книги не затронуты. Можно выбрать другую запись или удалить недоступную копию через «Действия».").setPositiveButton("Закрыть",null).show();return}
+        shelfJob?.cancel();folderJob?.cancel();busy=true;openingJob=lifecycleScope.launch{try{stopManualNavigation();captureLeaving();val selected=withContext(Dispatchers.IO){store.open(entry.id)};load(selected)}catch(e:Exception){handle(e);shell?.showShelf()}finally{busy=false}}
+    }
+    private fun manageBook(entry:BookEntry){
+        if(busy)return
+        AlertDialog.Builder(this).setTitle(entry.title).setItems(arrayOf("Сведения","Очистить пометки","Удалить книгу")){_,item->
+            if(item==0)AlertDialog.Builder(this).setTitle("Сведения о книге").setMessage("${entry.title}\n${entry.sourceName ?: "Прежняя внутренняя копия"}\nИмпорт: ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(entry.importedAt))}\n${entry.progress?.let{"Прочитано: $it%"} ?: if(entry.savedPlace)"Позиция сохранена"else"Чтение не начато"}\nПометок: ${entry.notes}\nID: ${entry.id}").setPositiveButton("Закрыть",null).show()
+            else AlertDialog.Builder(this).setTitle(if(item==1)"Очистить пометки?"else"Удалить внутреннюю книгу?").setMessage(if(item==1)"${entry.title}\nБудут удалены пометки и черновик. Книга, размер шрифта и место чтения сохранятся."else"${entry.title}\nБудут удалены внутренняя копия, пометки, черновик, позиция и её кеш. Исходный EPUB в папке останется.")
+                .setPositiveButton(if(item==1)"Очистить"else"Удалить"){_,_->changeBookData(entry,item==2)}.setNegativeButton("Отмена",null).show()
+        }.setNegativeButton("Закрыть",null).show()
+    }
+    private fun changeBookData(entry:BookEntry,delete:Boolean){
+        if(busy)return;busy=true
+        openingJob=lifecycleScope.launch {
+            var outcomeMessage=""
+            try {
+                if(book?.id==entry.id){stopManualNavigation();captureLeaving()
+                    if(!delete)session?.freeze(ReadingTrace.Source.NOTES)
+                    if(delete){session?.freeze();readerJob?.cancelAndJoin();decorationJob?.cancelAndJoin();navigator?.let{supportFragmentManager.beginTransaction().remove(it).commitNow()};publication?.close();session=null;navigator=null;publication=null;book=null;notes=null;rendition=null;sectionNavigation=null;selectionConfirmed=false}
+                }
+                withContext(NonCancellable+Dispatchers.IO){if(delete)check(store.delete(entry.id)){"Копия удалена с полки; не все временные файлы удалось очистить"}else store.clearNotes(entry.id)}
+                if(!delete && book?.id==entry.id){notes?.data?.put("notes",org.json.JSONArray());notes?.data?.remove("draft");session?.userNavigation();refreshNotes()}
+            }catch(e:Exception){handle(e);outcomeMessage=status.text.toString()}finally{if(!delete && book?.id==entry.id)session?.userNavigation();busy=false;showShelf(outcomeMessage)}
+        }
+    }
+    private fun openSourceFolder(){val tree=sourceFolder.saved();if(tree==null)pickFolder.launch(null)else AlertDialog.Builder(this).setTitle("Стартовая папка").setItems(arrayOf("Открыть папку","Выбрать другую папку")){_,i->if(i==0)browseFolder(tree)else pickFolder.launch(tree)}.setNegativeButton("Отмена",null).show()}
+    private fun browseFolder(tree:android.net.Uri,documentId:String?=null) {
+        if(busy)return
+        folderJob?.cancel()
+        folderJob=lifecycleScope.launch {
+            try {
+                val entries=withContext(Dispatchers.IO){sourceFolder.list(tree,documentId ?: android.provider.DocumentsContract.getTreeDocumentId(tree))}
+                if(entries.isEmpty()){AlertDialog.Builder(this@MainActivity).setMessage("В папке нет EPUB или подпапок").setPositiveButton("Закрыть",null).show();return@launch}
+                AlertDialog.Builder(this@MainActivity).setTitle("EPUB в папке").setItems(entries.map{(if(it.directory)"▸ "else"")+it.name}.toTypedArray()){_,index->val entry=entries[index];if(entry.directory)browseFolder(tree,android.provider.DocumentsContract.getDocumentId(entry.uri))else importBook({store.stage(entry.uri)},entry.uri,entry.name)}.setNegativeButton("Назад к полке"){_,_->showShelf()}.show()
+            }catch(e:Exception){if(e is CancellationException)throw e;AlertDialog.Builder(this@MainActivity).setTitle("Папка недоступна").setMessage("Доступ к исходной папке утрачен или провайдер недоступен. Внутренние копии и пометки сохранены.").setPositiveButton("Выбрать папку"){_,_->pickFolder.launch(null)}.setNegativeButton("Книги"){_,_->showShelf()}.show()}
+        }
+    }
+    private fun showReaderMenu(){
+        if(busy){status.text="Дождитесь открытия книги";return}
+        player.pause()
+        AlertDialog.Builder(this).setTitle("Чтение").setItems(arrayOf("Книги","Оглавление","Пометки · ${notes?.notes?.size ?: 0}","Вернуться к предыдущему месту","Настройки чтения","Озвучка · 5 фраз","Диагностика")){_,which->when(which){0->showShelf();1->showContents();2->showNotes();3->returnToPlace();4->showReadingSettings();5->showSpeechControls();6->showTtsDiagnostics()}}.setNegativeButton("Закрыть",null).show()
+    }
+    private fun showSpeechControls(){
+        val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(16),0,dp(16),0)}
+        val voices=RadioGroup(this).apply{orientation=RadioGroup.HORIZONTAL}
+        Voice.entries.forEachIndexed{i,v->voices.addView(RadioButton(this).apply{id=100+i;text=v.label;isChecked=v==voice})}
+        voices.setOnCheckedChangeListener{_,checked->player.reset();voice=if(checked==100)Voice.DMITRY else Voice.SVETLANA}
+        box.addView(voices);box.addView(row(button("5 фраз"){requestSpeech()},button("Пауза"){player.pause()},button("Продолжить"){player.resume()}))
+        AlertDialog.Builder(this).setTitle("Озвучка · проба из пяти фраз").setView(box).setPositiveButton("Закрыть",null).show()
+    }
+    private fun showReadingSettings(){
+        player.pause()
+        val oldBrightness=window.attributes.screenBrightness;val savedBrightness=appearance.getFloat("brightness",-1f)
+        fun revertBrightness(){window.attributes=window.attributes.apply{screenBrightness=oldBrightness};appearance.edit { putFloat("brightness",savedBrightness) }}
+        val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(20),0,dp(20),0)}
+        fun label(text:String){box.addView(TextView(this).apply{this.text=text})}
+        label("Тема");val themes=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,arrayOf("Авто — системная","Дневная","Ночная"));setSelection(listOf("auto","light","dark").indexOf(appearance.getString("theme","auto")).coerceAtLeast(0))};box.addView(themes)
+        label("Шрифт с кириллицей");val fonts=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,Appearance.fontNames);setSelection(Appearance.fonts.indexOf(Appearance.font(appearance)))};box.addView(fonts)
+        val sizeLabel=TextView(this);box.addView(sizeLabel);val size=SeekBar(this).apply{max=210;progress=(((notes?.data?.optDouble("fontSize",1.0) ?: 1.0)-.7)*100).toInt().coerceIn(0,210)};box.addView(size)
+        fun sizeText(){sizeLabel.text="Размер: ${70+size.progress}%"};sizeText();size.setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{override fun onStartTrackingTouch(s:SeekBar){};override fun onStopTrackingTouch(s:SeekBar){};override fun onProgressChanged(s:SeekBar,p:Int,user:Boolean){sizeText()}})
+        label("Яркость только этого окна");val brightness=SeekBar(this).apply{max=95;progress=((effectiveBrightness()-.05f)*100).toInt().coerceIn(0,95)};box.addView(brightness)
+        brightness.setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{override fun onStartTrackingTouch(s:SeekBar){};override fun onStopTrackingTouch(s:SeekBar){appearance.edit { putFloat("brightness",effectiveBrightness()) }};override fun onProgressChanged(s:SeekBar,p:Int,user:Boolean){if(user)setBrightness((p+5)/100f)}})
+        box.addView(button("Системная яркость"){window.attributes=window.attributes.apply{screenBrightness=-1f};appearance.edit { putFloat("brightness",-1f) }})
+        AlertDialog.Builder(this).setTitle("Настройки чтения").setView(ScrollView(this).apply{addView(box)}).setPositiveButton("Применить"){_,_->
+            appearance.edit { putString("theme",listOf("auto","light","dark")[themes.selectedItemPosition]);putString("font",Appearance.fonts[fonts.selectedItemPosition]) }
+            reflow {notes?.data?.put("fontSize",(size.progress+70)/100.0);persist();navigator?.submitPreferences(preferences());shell?.theme(Appearance.dark(appearance,resources.configuration))
+                delegate.localNightMode=when(appearance.getString("theme","auto")){"dark"->AppCompatDelegate.MODE_NIGHT_YES;"light"->AppCompatDelegate.MODE_NIGHT_NO;else->AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM}}
+        }.setNegativeButton("Отмена"){_,_->revertBrightness()}.setOnCancelListener{revertBrightness()}.show()
+    }
+    private fun effectiveBrightness()=window.attributes.screenBrightness.takeIf{it>=0} ?: runCatching{android.provider.Settings.System.getInt(contentResolver,android.provider.Settings.System.SCREEN_BRIGHTNESS,128)/255f}.getOrDefault(.5f)
+    private fun setBrightness(value:Float){window.attributes=window.attributes.apply{screenBrightness=Appearance.brightness(value)}}
+    private fun place():JSONObject? {
+        val data=notes?.data ?: return null
+        return if(data.optString("positionKind")=="visual")data.optJSONObject("visualPosition")?.let{JSONObject(it.toString()).put("kind","visual").put("bookId",book?.id)}else data.optJSONObject("positionV2")?.let{JSONObject(it.toString())}
+    }
+    private fun rememberPlace(){place()?.let{notes?.data?.put("previousPlace",it);persist();shell?.previousAvailable(true)}}
+    private fun returnToPlace(){
+        if(busy)return
+        val currentNotes=notes ?: return
+        val target=currentNotes.data.optJSONObject("previousPlace")?.let{JSONObject(it.toString())} ?: return
+        val reader=session ?: return;val controller=sectionNavigation ?: return
+        stopManualNavigation();navigationJob=lifecycleScope.launch{try{controller.run(SectionNavigation.Initiator.RETURN,target.getInt("chapter")){reader.restorePlace(target)};currentCoroutineContext().ensureActive();if(session!==reader)throw StaleReaderOperation();currentNotes.data.remove("previousPlace");currentNotes.save();shell?.previousAvailable(false)}catch(e:Exception){handle(e)}}
+    }
+    private fun reflow(change:()->Unit){
+        val reader=session
+        if(reader==null){change();return}
+        player.pause();navigationJob?.cancel();resizeJob?.cancel()
+        resizeJob=lifecycleScope.launch {
+            try{reader.capture();val target=place();val operation=reader.freeze(ReadingTrace.Source.FONT);change();delay(100);reader.requireCurrent(operation)
+                reader.awaitFont(notes?.data?.optDouble("fontSize",1.0) ?: 1.0,operation)
+                if(target!=null)reader.restorePlace(target,operation)else reader.restoreInitial()
+            }catch(e:Exception){handle(e)}
+        }
+    }
+    private fun togglePanels(){val view=shell ?: return;val visible=!view.panels;reflow{view.setPanels(visible);appearance.edit { putBoolean("panels",visible) }}}
+    private fun seekWholeBook(value:Int){
+        val adapter=rendition ?: return;val reader=session ?: return;val controller=sectionNavigation ?: return
+        if(busy || adapter.book.total<=0)return
+        val (index,offset)=adapter.sourceAt((adapter.book.total.toDouble()*value/10000).toInt().coerceIn(0,adapter.book.total)) ?: return
+        val start=offset.coerceAtMost(TextModel.length(adapter.book.chapters[index].text)-1)
+        val target=JSONObject().put("chapter",index).put("start",start).put("end",start+1).put("quote",TextModel.slice(adapter.book.chapters[index].text,start,start+1))
+        stopManualNavigation();navigationJob=lifecycleScope.launch{try{controller.run(SectionNavigation.Initiator.SLIDER,index){reader.navigateTo(target)}}catch(e:Exception){handle(e)}}
+    }
+    private fun handleReaderAction(action:JSONObject){
+        when(action.optString("kind")){
+            "brightness"->{val gesture=action.optString("gesture");if(brightnessGesture!=gesture){brightnessGesture=gesture;brightnessBase=effectiveBrightness()};setBrightness(brightnessBase+action.optDouble("delta").toFloat());if(action.optBoolean("end"))appearance.edit { putFloat("brightness",effectiveBrightness()) }}
+            "panels"->togglePanels()
+            "page"->{val nav=navigator ?: return;val reader=session ?: return;val controller=sectionNavigation ?: return
+                stopManualNavigation();reader.userNavigation()
+                navigationJob=lifecycleScope.launch{try{
+                    val step=bridge.installedCall(nav,"JJ.pageStep(${action.getInt("direction")})") ?: return@launch
+                    currentCoroutineContext().ensureActive();if(session!==reader || step.optString("documentId")!=reader.documentId)throw StaleReaderOperation()
+                    reader.tracePageStep(step)
+                    val delta=step.optInt("resource",0);val target=reader.chapterIndex()+delta
+                    if(delta!=0 && target in reader.book.chapters.indices){val placement=if(delta>0)BoundaryPlacement.RESOURCE_START else BoundaryPlacement.END_PAGE;controller.boundary(target,placement,SectionNavigation.Initiator.TAP,step)}
+                }catch(e:Exception){handle(e)}finally{withContext(NonCancellable){withTimeoutOrNull(500){bridge.installedCall(nav,"JJ.edgeComplete()")}}}}
+            }
+            "edge"->{val reader=session ?: return;val direction=action.optInt("direction");val target=reader.chapterIndex()+direction;if(target in checkNotNull(book).chapters.indices)navigateSection(target,if(direction<0)BoundaryPlacement.END_TOP else BoundaryPlacement.RESOURCE_START,SectionNavigation.Initiator.GESTURE)else navigator?.let{nav->lifecycleScope.launch{bridge.installedCall(nav,"JJ.edgeComplete()")}}}
+        }
+    }
+    private fun buildPrototypeUi() {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFFF7F3EB.toInt()) }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
@@ -101,7 +274,7 @@ open class MainActivity : AppCompatActivity() {
         heading = TextView(this).apply { text = "JJReader · P0"; textSize = 19f; setPadding(dp(16), dp(10), dp(12), dp(4)) }
         root.addView(heading)
         root.addView(row(button("Открыть EPUB") { if (!busy) openDocument.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
-            button("Пример P0") { if (!busy) importBook { store.stage(assets.open("p0-sample.epub")) } },button("Книги"){showBooks()}))
+            button("Пример P0") { if (!busy) importBook({store.stage(assets.open("p0-sample.epub"))},sourceLabel="Пример P0.epub") },button("Книги"){showBooks()}))
         notesButton = button("Пометки · 0") { showNotes() }
         root.addView(row(button("А−") { resize(-0.15) }, button("А+") { resize(0.15) }, notesButton))
         progress = TextView(this).apply { text = "Процент по видимому тексту · эксперимент"; textSize = 12f; setPadding(dp(16), 0, dp(12), dp(5)) }
@@ -187,8 +360,9 @@ open class MainActivity : AppCompatActivity() {
         orientation = LinearLayout.HORIZONTAL; setPadding(dp(8), 0, dp(8), 0)
         views.forEach { addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
     }
-    private fun importBook(copy: () -> java.io.File) {
+    private fun importBook(copy: () -> java.io.File,sourceUri:android.net.Uri?=null,sourceLabel:String?=null) {
         if(busy)return
+        shelfJob?.cancel();folderJob?.cancel()
         stopManualNavigation();busy = true; status.text = "Импорт внутренней копии EPUB…"
         openingJob=lifecycleScope.launch {
             var staged: java.io.File? = null
@@ -199,7 +373,7 @@ open class MainActivity : AppCompatActivity() {
                 val matches=withContext(Dispatchers.IO){store.identical(file)}
                 val imported=if(matches.isEmpty()) {
                     libraryEvent("NEW_IMPORT")
-                    withContext(Dispatchers.IO){val candidate=engine.open(file);try{store.commit(file,candidate.metadata.title ?: "Без названия",engine.chapters(candidate)).also{created=it}}finally{candidate.close()}}
+                    withContext(Dispatchers.IO){val candidate=engine.open(file);try{store.commit(file,candidate.metadata.title ?: "Без названия",engine.chapters(candidate),sourceLabel ?: sourceUri?.let{uri->contentResolver.query(uri,arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),null,null,null)?.use{c->if(c.moveToFirst())c.getString(0)else null}}).also{created=it}}finally{candidate.close()}}
                 } else {
                     libraryEvent(if(matches.size==1)"REOPEN"else"CHOOSE_DUPLICATE")
                     val chosen=if(matches.size==1)matches.single()else chooseBook(matches)
@@ -223,6 +397,7 @@ open class MainActivity : AppCompatActivity() {
         continuation.invokeOnCancellation{dialog.dismiss()};dialog.show()
     }
     private fun showBooks() {
+        if(!prototypeControls){showShelf();return}
         if(busy){status.text="Дождитесь открытия книги";return}
         player.pause();busy=true
         openingJob=lifecycleScope.launch {
@@ -238,10 +413,11 @@ open class MainActivity : AppCompatActivity() {
     }
     private suspend fun captureLeaving(){
         navigationJob?.cancelAndJoin();resizeJob?.cancelAndJoin()
-        session?.let{try{it.capture()}catch(e:Exception){if(e is CancellationException)throw e}}
+        navigator?.let{nav->try{updateViewport(nav)}catch(e:Exception){if(e is CancellationException)throw e}}
     }
     private fun stopManualNavigation(){player.reset();speechChapter=null;navigationJob?.cancel();resizeJob?.cancel()}
     private suspend fun load(value: Book) {
+        shelfJob?.cancel()
         openingJob=currentCoroutineContext()[Job]
         val mode=ReadingMode.current(getSharedPreferences("reader",MODE_PRIVATE))
         val unifiedEnabled=mode=="unified"
@@ -249,6 +425,7 @@ open class MainActivity : AppCompatActivity() {
         val attempt=openingAttempts.begin(info.versionName ?: "unknown",info.longVersionCode,unifiedEnabled,rendition?.mode,mode)
         var pendingPublication:Publication?=null
         try {
+        shell?.showReader()
         val newNotes = withContext(Dispatchers.IO) { NoteStore(this@MainActivity, value.id) }
         fun indexOf(href:String?) = value.chapters.indexOfFirst { it.href.substringBefore('#') == href?.substringBefore('#') }
         fun storeEvent(event:ReadingTrace.Event,source:ReadingTrace.Source,data:JSONObject,disk:JSONObject?) {
@@ -293,7 +470,7 @@ open class MainActivity : AppCompatActivity() {
         navigator?.let { supportFragmentManager.beginTransaction().remove(it).commitNow() }
         publication?.close()
         selectionConfirmed=false
-        book = value; notes = newNotes; publication = pub; pendingPublication=null; rendition=adapter; verifiedHref = null; mappingValid = false
+        book = value; shell?.bookAvailable(true); notes = newNotes; publication = pub; pendingPublication=null; rendition=adapter; verifiedHref = null; mappingValid = false
         supportFragmentManager.fragmentFactory = EpubNavigatorFactory(pub).createFragmentFactory(
             initialLocator = adapter.initialLocator(newNotes.data),
             initialPreferences = preferences(),
@@ -302,7 +479,7 @@ open class MainActivity : AppCompatActivity() {
             override fun onJumpToLocator(locator:Locator) {
                 val reader=session ?: return;val controller=sectionNavigation ?: return
                 if(reader.book.id!=value.id || controller.busy || !reader.ready)return
-                stopManualNavigation();reader.userNavigation()
+                rememberPlace();stopManualNavigation();reader.userNavigation()
                 navigationJob=lifecycleScope.launch {
                     try{val index=value.chapters.indexOfFirst{it.href.substringBefore('#')==locator.href.toString().substringBefore('#')}
                         if(index>=0)controller.run(SectionNavigation.Initiator.LINK,index){reader.confirmLink(index,locator)}
@@ -317,6 +494,7 @@ open class MainActivity : AppCompatActivity() {
             })
         val nav = supportFragmentManager.fragmentFactory.instantiate(classLoader, EpubNavigatorFragment::class.java.name) as EpubNavigatorFragment
         navigator = nav
+        if(!prototypeControls)nav.addInputListener(object:org.readium.r2.navigator.input.InputListener{override fun onTap(event:org.readium.r2.navigator.input.TapEvent)=true})
         val reader = ReaderSession(value,newNotes,adapter.port(nav,bridge){index->nav.go(pub.readingOrder[index],animated=false)},readingTrace,activityId){player.reset();speechChapter=null}
         session = reader
         val controller=SectionNavigation(reader,java.io.File(filesDir,"section-navigation.json")){blocked->if(session===reader)bridge.installedCall(nav,if(blocked)"JJ.blockEdges()"else"JJ.edgeComplete()");Unit};sectionNavigation=controller
@@ -333,6 +511,8 @@ open class MainActivity : AppCompatActivity() {
                 return true
             }
         })
+        shell?.showReader()
+        player.bindBook(value.id)
         heading.text = value.title
         status.text = if(derived!=null)"Единая лента. Долгое нажатие → Пометка."else"Разделы: следующий жест на краю — переход. Долгое нажатие → Пометка."
         openMs=0
@@ -358,12 +538,15 @@ open class MainActivity : AppCompatActivity() {
                 if(adapter.sections)launch {
                     while(isActive) {
                         try {
-                        if(adapter.sections && reader.ready && !controller.busy && !busy && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                            val edge=bridge.installedCall(nav,"JJ.takeEdge()")
-                            if(edge!=null && edge.optString("documentId")==reader.documentId) {
-                                val target=reader.chapterIndex()+if(edge.optString("direction")=="next")1 else -1
-                                if(target in value.chapters.indices)navigateSection(target,edge.optString("direction")=="previous",SectionNavigation.Initiator.GESTURE)
-                                else bridge.call(nav,"JJ.edgeComplete()")
+                        if(adapter.sections && reader.ready && shell?.onShelf!=true && !controller.busy && !busy && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                            if(!prototypeControls){
+                                bridge.installedCall(nav,"JJ.configureInteractions(true)")
+                                val action=bridge.installedCall(nav,"JJ.takeReaderAction()")
+                                if(action!=null && action.optString("documentId")==reader.documentId)handleReaderAction(action)
+                            }else {
+                                val edge=bridge.installedCall(nav,"JJ.takeEdge()")
+                                if(edge!=null && edge.optString("documentId")==reader.documentId){val target=reader.chapterIndex()+if(edge.optString("direction")=="next")1 else -1
+                                    if(target in value.chapters.indices)navigateSection(target,if(edge.optString("direction")=="previous")BoundaryPlacement.END_TOP else BoundaryPlacement.RESOURCE_START,SectionNavigation.Initiator.GESTURE)else bridge.installedCall(nav,"JJ.edgeComplete()")}
                             }
                         }
                         }catch(e:Exception){if(e is CancellationException)throw e;handle(e)}
@@ -372,12 +555,13 @@ open class MainActivity : AppCompatActivity() {
                 }
                 launch {
                     while (isActive) {
-                        try { updateViewport(nav) } catch (e: Exception) { if (e is CancellationException && e !is StaleReaderOperation) throw e; progress.text = "Процент: DOM ещё не готов" }
+                        try { if(shell?.onShelf!=true)updateViewport(nav) } catch (e: Exception) { if (e is CancellationException && e !is StaleReaderOperation) throw e; progress.text = "Процент: DOM ещё не готов" }
                         if(!draftShown && reader.ready) {
                             draftShown=true
                             openMs=(System.nanoTime()-openBegan)/1_000_000;readingTrace.metadata(buildMetadata())
                             withContext(Dispatchers.IO){if(session===reader)store.select(value.id)}
                             if(session===reader){selectionConfirmed=true;openingAttempts.success(attempt,adapter.mode);readingTrace.metadata(buildMetadata())}
+                            shell?.previousAvailable(newNotes.data.has("previousPlace"))
                             refreshNotes();newNotes.data.optJSONObject("draft")?.let{editNote(it)}
                         }
                         delay(350)
@@ -390,6 +574,7 @@ open class MainActivity : AppCompatActivity() {
             openingAttempts.failed(attempt,e)
             if(e is CancellationException)throw e
             if(!openingAttempts.isCurrent(attempt))return
+            if(!prototypeControls){val entries=withContext(Dispatchers.IO){store.entries()};shell?.shelf(entries,"Не удалось открыть книгу. Данные сохранены; можно выбрать другую копию.")}
             val failed=openingAttempts.json().getJSONObject("latest")
             status.text="Ошибка открытия: ${failed.getString("stage")} (${failed.getString("errorCode")}). Источник и пометки сохранены."
             AlertDialog.Builder(this).setTitle("Книга не открыта").setMessage(status.text)
@@ -397,7 +582,8 @@ open class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Закрыть",null).show()
         }
     }
-    private fun preferences() = EpubPreferences(scroll = true, fontSize = notes?.data?.optDouble("fontSize", 1.0) ?: 1.0, pageMargins = 2.0, publisherStyles = false)
+    private fun preferences() = EpubPreferences(scroll = true, fontSize = notes?.data?.optDouble("fontSize", 1.0) ?: 1.0, pageMargins = 2.0, publisherStyles = false,
+        fontFamily=if(prototypeControls)null else FontFamily(Appearance.font(appearance)),theme=if(Appearance.dark(appearance,resources.configuration))Theme.DARK else Theme.LIGHT)
     private fun resize(delta: Double) {
         val data = notes?.data ?: return; player.pause()
         data.put("fontSize", (data.optDouble("fontSize", 1.0) + delta).coerceIn(0.7, 2.8)); persist()
@@ -417,22 +603,24 @@ open class MainActivity : AppCompatActivity() {
         }
     }
     private fun chapterIndex(nav: EpubNavigatorFragment) = session?.chapterIndex() ?: -1
-    private fun changeResource(delta:Int){val reader=session ?: return;navigateSection(reader.chapterIndex()+delta,false,SectionNavigation.Initiator.BUTTON)}
-    private fun navigateSection(index:Int,end:Boolean=false,initiator:SectionNavigation.Initiator=SectionNavigation.Initiator.TOC,targetId:String?=null) {
+    private fun changeResource(delta:Int){val reader=session ?: return;navigateSection(reader.chapterIndex()+delta,initiator=SectionNavigation.Initiator.BUTTON)}
+    private fun navigateSection(index:Int,placement:BoundaryPlacement=BoundaryPlacement.RESOURCE_START,initiator:SectionNavigation.Initiator=SectionNavigation.Initiator.TOC,targetId:String?=null) {
         val adapter=rendition ?: return;val nav=navigator ?: return;val reader=session ?: return;val controller=sectionNavigation ?: return
         if(busy || index !in adapter.book.chapters.indices)return
         stopManualNavigation()
         navigationJob=lifecycleScope.launch {
             try {
-                controller.run(initiator,index,end){
+                if(initiator==SectionNavigation.Initiator.TOC)rememberPlace()
+                val resourceEntry=targetId?.substringAfter('#',"").isNullOrEmpty()
+                controller.run(initiator,index,if(resourceEntry)placement else null){
                     if(adapter.unified!=null){
                         val (actual,offset)=adapter.boundary(index) ?: error("NO_TEXT")
                         val anchor=targetId?.let{bridge.call(nav,"JJ.forSection($actual).anchorForId(${JSONObject.quote(it)})")} ?: adapter.anchor(bridge,nav,actual,offset,offset+1)
                         anchor.put("chapter",actual);reader.navigateTo(anchor)
-                    }else if(targetId!=null){
+                    }else if(!resourceEntry && targetId!=null){
                         val link=checkNotNull(org.readium.r2.shared.publication.Link.fromJSON(JSONObject().put("href",targetId).put("type","application/xhtml+xml")))
                         val locator=checkNotNull(publication?.locatorFromLink(link));reader.confirmLink(index,locator)
-                    }else reader.navigateBoundary(index,end,ReadingTrace.Source.NATIVE)
+                    }else reader.navigateBoundary(index,placement,ReadingTrace.Source.NATIVE)
                 }
             }catch(e:Exception){handle(e)}
         }
@@ -455,17 +643,21 @@ open class MainActivity : AppCompatActivity() {
         val viewport = reader.capture() ?: return
         mappingValid = true; verifiedHref = nav.currentLocator.value.href.toString()
         val end = viewport.getInt("last"); visibleFirst = (viewport.optJSONObject("anchor")?.optInt("start") ?: viewport.getInt("first")).coerceAtLeast(0); if (end < 0) return
-        progress.text = "${TextModel.percent(checkNotNull(rendition).absolute(viewport.optInt("lastSourceChapter",index),end),current.total)}% · эксперимент · ресурс ${index + 1}/${current.chapters.size}"
+        val percent=TextModel.percent(checkNotNull(rendition).absolute(viewport.optInt("lastSourceChapter",index),end),current.total)
+        progress.text="$percent% · раздел ${reader.chapterIndex()+1}/${current.chapters.size}"
+        if(notes?.data?.optInt("progress",-1)!=percent){notes?.data?.put("progress",percent);persist()}
+        if(!scrubbing)shell?.slider?.progress=if(current.total==0)0 else (checkNotNull(rendition).absolute(viewport.optInt("lastSourceChapter",index),end).toDouble()/current.total*10000).toInt().coerceIn(0,10000)
     }
     private val selectionCallback = object : ActionMode.Callback {
         override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
             player.pause()
             val id = UUID.randomUUID().toString(); selectionSession = id
             lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) { navigator?.let { bridge.call(it, "JJ.beginSelection(${JSONObject.quote(id)})") } }
-            menu.add(0, 501, 0, "Пометка"); return true
+            menu.add(0, 501, 0, "Пометка");menu.add(0,android.R.id.copy,1,"Копировать"); return true
         }
         override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
         override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+            if(item.itemId==android.R.id.copy){val reader=session ?: return true;val id=selectionSession ?: return true;lifecycleScope.launch{try{val text=reader.selection(id).getString("quote");getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("Цитата",text));mode.finish()}catch(e:Exception){handle(e)}};return true}
             if (item.itemId != 501) return false
             val reader = session ?: return true
             val id = selectionSession ?: return true
@@ -496,7 +688,7 @@ open class MainActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { draft.put("comment", s.toString()); notes?.data?.put("draft", draft); persist() }
             override fun afterTextChanged(s: Editable?) = Unit
         })
-        val dialog = AlertDialog.Builder(this).setTitle("Пробная пометка · жёлтый").setView(content).setPositiveButton("Сохранить", null)
+        val dialog = AlertDialog.Builder(this).setTitle(if(prototypeControls)"Пробная пометка · жёлтый"else"Комментарий").setView(content).setPositiveButton("Сохранить", null)
             .setNegativeButton("Отменить") { _, _ -> notes?.data?.remove("draft"); persist() }.create()
         editor = dialog
         dialog.setOnShowListener {
@@ -545,13 +737,14 @@ open class MainActivity : AppCompatActivity() {
         traceDialog(ReadingTrace.Source.NOTE,ReadingTrace.Reason.OPEN)
         val list = notes?.notes?.sortedWith(compareBy({ it.getInt("chapter") }, { it.getInt("start") }, { it.getString("id") })) ?: emptyList()
         if (list.isEmpty()) { status.text = "Выделите текст долгим нажатием → Пометка."; return }
-        val listDialog = AlertDialog.Builder(this).setTitle("Пробные пометки").setItems(list.map { it.getString("quote").take(70) + " — " + it.getString("comment") }.toTypedArray()) { _, which ->
+        val listDialog = AlertDialog.Builder(this).setTitle(if(prototypeControls)"Пробные пометки"else"Пометки").setItems(list.map { it.getString("quote").take(70) + " — " + it.getString("comment") }.toTypedArray()) { _, which ->
             val reader = session ?: return@setItems
             player.reset();speechChapter=null
             val note = JSONObject(list[which].toString())
             navigationJob?.cancel(); resizeJob?.cancel()
             navigationJob = lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
+                    rememberPlace()
                     sectionNavigation?.run(SectionNavigation.Initiator.NOTE,note.getInt("chapter")){reader.navigateTo(note)}
                     if(reader.lastRestoreCode!=null)status.text="Сохранено проверенное видимое место. Точный диапазон не подтверждён; доступна диагностика."
                 } catch (e: Exception) {
@@ -623,12 +816,23 @@ open class MainActivity : AppCompatActivity() {
         }
         if (e is CancellationException) throw e
         status.text = e.message?.takeIf { !it.contains("<") && it.length < 180 } ?: "Не удалось выполнить действие. Данные книги сохранены."
+        if(shell?.onShelf==true)shell?.message(status.text.toString())
     }
-    override fun onResume() { super.onResume(); if (navigator != null) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    override fun onConfigurationChanged(configuration:android.content.res.Configuration) {
+        super.onConfigurationChanged(configuration)
+        if(editor!=null){shell?.theme(Appearance.dark(appearance,configuration));navigator?.submitPreferences(preferences());return}
+        if(shell!=null)reflow{
+            val dark=Appearance.dark(appearance,configuration);shell?.theme(dark);navigator?.submitPreferences(preferences())
+            androidx.core.view.WindowCompat.getInsetsController(window,window.decorView).apply{isAppearanceLightStatusBars=!dark;isAppearanceLightNavigationBars=!dark}
+        }
+    }
+    override fun onResume() { super.onResume(); if (navigator != null && shell?.onShelf!=true) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     override fun onPause() {
         readingTrace.record(ReadingTrace.Event.PAUSE,ReadingTrace.Source.LIFECYCLE,activityId)
         session?.traceState(ReadingTrace.Event.PAUSE,ReadingTrace.Source.LIFECYCLE)
         player.pause()
+        scrubJob?.cancel();folderJob?.cancel();shelfJob?.cancel()
+        if(window.attributes.screenBrightness>=0)appearance.edit { putFloat("brightness",window.attributes.screenBrightness) }
         openingJob?.cancel()
         val reader=session
         reader?.preparePause()
