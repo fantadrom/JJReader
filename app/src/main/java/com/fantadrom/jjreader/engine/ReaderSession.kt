@@ -31,6 +31,7 @@ internal interface ReaderPort {
     suspend fun text(): String?
     suspend fun goResource(index: Int): Boolean
     suspend fun go(locator: Locator)
+    suspend fun present(index:Int,operation:Long,document:String?){}
     fun locator(anchor: JSONObject): Locator
 }
 
@@ -147,7 +148,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         target=data.optJSONObject("positionV2")?.optInt("chapter"),anchor=data.optJSONObject("positionV2"),failure=lastRestoreCode)
     private fun code(error: Exception, stage: String): RestoreCode = when(error) {
         is RestoreFailure -> error.code
-        is TimeoutCancellationException -> if(stage == "ack")RestoreCode.ACK_TIMEOUT else RestoreCode.DOM_TIMEOUT
+        is TimeoutCancellationException -> if(stage == "ack")RestoreCode.ACK_TIMEOUT else if(stage=="present")RestoreCode.PRESENT_TIMEOUT else RestoreCode.DOM_TIMEOUT
         is CancellationException -> RestoreCode.CANCELLED
         is org.json.JSONException -> RestoreCode.JS_RESULT
         else -> RestoreCode.entries.firstOrNull{it.name == error.message} ?: if(stage == "save")RestoreCode.SAVE_ERROR else RestoreCode.INTERNAL_ERROR
@@ -308,6 +309,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             }}
             guard(operation);persistVisual(index,end,operation,placement);lastRestoreCode=null
             emit(ReadingTrace.Event.ACK,target=index,accepted=true)
+            port.present(index,operation,documentId);afterAwait(operation)
         }catch(e:Exception){if(revision==operation){phase=Phase.RECOVERING;lastRestoreCode=code(e,"visual")};throw e}
         finally{if(revision==operation)activeTarget=null}
     }
@@ -316,6 +318,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         port.go(locator);afterAwait(operation);context(index,operation)
         phase=Phase.RECOVERING
         check(recoverVisible(operation)){"LINK_NOT_CONFIRMED"}
+        lastRestoreCode=null // A new verified jump must not inherit an earlier rejected target.
     }
     fun validate(anchor: JSONObject, index: Int) {
         require(index in book.chapters.indices) { "ANCHOR_RESOURCE" }
@@ -376,6 +379,8 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             persistAnchor(resolved,index,operation)
             lastRestoreCode = null; phase = Phase.TRACKING
             emit(ReadingTrace.Event.READY,target=index)
+            stage="present"
+            port.present(index,operation,documentId);afterAwait(operation)
         } catch(e: Exception) {
             if(e is StaleReaderOperation)throw e
             if(!failed(e,operation,stage,last))throw RestoreFailure(checkNotNull(lastRestoreCode))
@@ -398,6 +403,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
             locatorChapter=indexOf(locator.href.toString()))
     }
     suspend fun capture(): JSONObject? {
+        val recovering=phase==Phase.RECOVERING
         if (phase != Phase.TRACKING && phase != Phase.RECOVERING) { emit(ReadingTrace.Event.REJECT,ReadingTrace.Source.CAPTURE,reason=ReadingTrace.Reason.NOT_READY); return null }
         val operation = revision
         var index=chapterIndex();var state=context(index,operation)
@@ -410,6 +416,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         if(revision!=operation || snap.optString("documentId")!=state.getString("documentId") || !matchesState(snap,index))return null
         if(port.sections && snap.optBoolean("visual") && snap.optBoolean("layoutStable") && positiveViewport(snap)) {
             persistVisual(index,snap.optBoolean("visualEnd"),operation,BoundaryPlacement.read(snap.optJSONObject("entryPlacement")))
+            if(recovering){port.present(index,operation,documentId);afterAwait(operation)}
             return snap
         }
         if(!snap.optBoolean("layoutReady") || !snap.optBoolean("layoutStable") || !positiveViewport(snap) || !snap.optBoolean("shown")) {
@@ -421,6 +428,7 @@ class ReaderSession internal constructor(val book: Book, private val data: JSONO
         validate(anchor, index)
         persistAnchor(anchor, index, operation, ReadingTrace.Source.CAPTURE)
         if(!ready) { phase=Phase.TRACKING;emit(ReadingTrace.Event.RECOVERY,ReadingTrace.Source.CAPTURE,index,snap,anchor,accepted=true,failure=lastRestoreCode) }
+        if(recovering){port.present(index,operation,documentId);afterAwait(operation)}
         return snap
     }
     suspend fun selection(session: String): JSONObject {

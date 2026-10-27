@@ -9,7 +9,7 @@ import java.util.UUID
 
 /** Bounded local trace, shared across Activity/process recreation. No free-form strings or payloads. */
 class ReadingTrace(private val file: File) {
-    enum class Event { CREATE, PAUSE, DESTROY, STORE_LOAD, STORE_WRITE, INITIAL, READY, FREEZE, GO, DOM, RESTORE_REQUEST, ACK_WAIT, ACK, RECOVERY, FALLBACK, COMMIT, CAPTURE, REJECT, NATIVE, DIALOG, PAGE_STEP }
+    enum class Event { CREATE, PAUSE, DESTROY, STORE_LOAD, STORE_WRITE, INITIAL, READY, FREEZE, GO, DOM, RESTORE_REQUEST, ACK_WAIT, ACK, RECOVERY, FALLBACK, COMMIT, CAPTURE, REJECT, NATIVE, DIALOG, PAGE_STEP, PRESENT_HIDE, PRESENT_VISUAL_READY, PRESENT_REVEAL }
     enum class Source { LIFECYCLE, INITIAL, NOTE, CAPTURE, RESTORE, FONT, IME, NATIVE, NOTES, ACTIVITY, SESSION, DIAGNOSTIC }
     enum class Reason { STALE, CANCELLED, NOT_READY, NO_ANCHOR, NULL_RESULT, RESOURCE_MISMATCH, DOM_MISMATCH, WRITE_READ_MISMATCH, ERROR, OPEN, CLOSE }
     fun begin() = synchronized(file.absolutePath.intern()) { runCatching { BookStore.writeAtomic(file, empty()) }; Unit }

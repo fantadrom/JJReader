@@ -27,6 +27,8 @@ class ReaderPositionTest {
         var contextGate: CompletableDeferred<Unit>? = null
         var viewportGate: CompletableDeferred<Unit>? = null
         var viewportAnchor: JSONObject? = null
+        var onPresent:(suspend(Int)->Unit)?=null
+        override suspend fun present(index:Int,operation:Long,document:String?){onPresent?.invoke(index)}
         override fun chapterIndex()=index
         private fun context()=JSONObject().put("url","https://readium_package/"+book.chapters[index].href)
             .put("documentId","$index-$document").put("nativeReady",true).put("viewportWidth",430).put("viewportHeight",650).put("layoutReady",true).put("layoutStable",true).put("shown",true)
@@ -48,12 +50,30 @@ class ReaderPositionTest {
             else -> error("Unexpected bridge call")
         }
     }
+    @Test fun presentationIsRequestedOnlyAfterAckAndDurableTargetCommit()=runTest {
+        val data=JSONObject();val port=Port();var shown=0
+        lateinit var reader:ReaderSession
+        reader=ReaderSession(book,data,{},port)
+        port.onPresent={index->assertTrue(reader.ready);assertEquals(index,data.getJSONObject("positionV2").getInt("chapter"));assertEquals(90,data.getJSONObject("positionV2").getInt("start"));shown++}
+        reader.navigateTo(anchor(1,90));assertEquals(1,shown)
+        try{reader.navigateTo(anchor(0,20).put("textHash","wrong"));fail()}catch(_:IllegalStateException){}
+        assertEquals(1,shown)
+    }
     @Test fun returnPlaceUsesOriginalCoordinatesAndRejectsMismatchedBook()=runTest {
         val data=JSONObject();val port=Port();val reader=ReaderSession(book,data,{},port)
         val previous=anchor(0,90);reader.navigateTo(previous);reader.navigateTo(anchor(1,160))
         reader.restorePlace(previous);assertTrue(reader.ready);assertEquals(0,port.index);assertEquals(90,data.getJSONObject("positionV2").getInt("start"))
         try{reader.restorePlace(JSONObject(previous.toString()).put("bookId","different"));fail("Wrong book")}catch(_:IllegalStateException){}
         assertEquals(ReaderSession.Phase.RECOVERING,reader.phase)
+    }
+    @Test fun verifiedLinkRetryClearsEarlierTargetFailure()=runTest {
+        val data=JSONObject();val port=Port();val reader=ReaderSession(book,data,{},port)
+        reader.navigateTo(anchor(0,20));port.viewportAnchor=anchor(0,20)
+        reader.navigateTo(anchor(1,30).put("textHash","wrong"));assertEquals(RestoreCode.ANCHOR_HASH,reader.lastRestoreCode)
+        port.viewportAnchor=anchor(1,60)
+        val locator=checkNotNull(Locator.fromJSON(JSONObject().put("href",book.chapters[1].href).put("type","application/xhtml+xml")))
+        reader.confirmLink(1,locator)
+        assertTrue(reader.ready);assertNull(reader.lastRestoreCode);assertEquals(1,data.getJSONObject("positionV2").getInt("chapter"));assertEquals(60,data.getJSONObject("positionV2").getInt("start"))
     }
     @Test fun repeatedCrossResourceJumpsSurviveImmediateAndDelayedRecreationWithoutViewportAnchor() = runTest {
         for (wait in listOf(0L,2500L)) {
