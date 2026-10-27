@@ -11,28 +11,34 @@ import java.security.MessageDigest
 object TextModel {
     private val blocks = setOf("p", "div", "section", "article", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "tr", "td", "figcaption", "pre", "br")
     private val excluded = setOf("script", "style", "nav", "noscript", "iframe", "object", "svg", "math", "template")
-    fun normalize(html: String): String {
+    data class Indexed(val text:String,val targets:Map<String,Int>)
+    fun normalize(html: String): String = index(html).text
+    fun index(html:String):Indexed {
         val out = StringBuilder()
+        var count=0
+        val targets=linkedMapOf<String,Int>();val duplicates=mutableSetOf<String>()
         fun separator() {
-            while (out.endsWith(" ")) out.setLength(out.length - 1)
-            if (out.isNotEmpty() && !out.endsWith("\n")) out.append("\n\n")
+            while (out.endsWith(" ")) {out.setLength(out.length - 1);count--}
+            if (out.isNotEmpty() && !out.endsWith("\n")) {out.append("\n\n");count+=2}
         }
         fun visit(node: Node) {
             if (node is Element) {
                 if (node.normalName() in excluded || node.hasAttr("hidden") || node.attr("aria-hidden") == "true") return
                 if (node.normalName() in blocks) separator()
+                node.id().takeIf{it.isNotEmpty()}?.let{id->if(targets.putIfAbsent(id,count)!=null)duplicates+=id}
                 node.childNodes().forEach(::visit)
                 if (node.normalName() in blocks) separator()
             } else if (node is TextNode) {
                 node.wholeText.codePoints().forEach { cp ->
                     if (cp in listOf(9, 10, 12, 13, 32, 160)) {
-                        if (out.isNotEmpty() && !out.endsWith(" ") && !out.endsWith("\n")) out.append(' ')
-                    } else out.appendCodePoint(cp)
+                        if (out.isNotEmpty() && !out.endsWith(" ") && !out.endsWith("\n")) {out.append(' ');count++}
+                    } else {out.appendCodePoint(cp);count++}
                 }
             }
         }
         visit(Jsoup.parse(html).body())
-        return out.toString().trimEnd(' ', '\n')
+        val text=out.toString().trimEnd(' ', '\n');val end=length(text)
+        return Indexed(text,targets.filterKeys{it !in duplicates}.mapValues{it.value.coerceAtMost(end)})
     }
     fun length(text: String) = text.codePointCount(0, text.length)
     fun slice(text: String, start: Int, end: Int): String =

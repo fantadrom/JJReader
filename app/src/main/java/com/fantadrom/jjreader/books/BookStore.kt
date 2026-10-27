@@ -72,13 +72,15 @@ class BookStore(private val context: Context) {
         return open(id)
     }
     fun select(id:String) { require(UUID.fromString(id).toString()==id);check(File(root,"$id/book.epub").isFile && File(root,"$id/book.json").isFile);writeAtomic(File(root,"current.json"),JSONObject().put("schema",1).put("id",id)) }
-    fun open(id:String):Book {
+    fun open(id:String):Book=snapshot(id).also{require(it.file.exists()){ "Копия книги недоступна" }}
+    /** Extracted text remains available when only the EPUB is missing or damaged. */
+    fun snapshot(id:String):Book {
         require(UUID.fromString(id).toString()==id)
         val dir = File(root, id)
         val meta = readAtomic(File(dir, "book.json"))
         require(meta.getInt("schema") == 1) { "Неизвестная версия данных книги" }
         val chapters = meta.getJSONArray("chapters")
-        return Book(id, meta.getString("title"), File(dir, "book.epub").also { require(it.exists()) { "Копия книги недоступна" } },
+        return Book(id, meta.getString("title"), File(dir, "book.epub"),
             (0 until chapters.length()).map { chapters.getJSONObject(it).run { Chapter(getString("href"), getString("title"), getString("text")) } })
     }
     /** Streaming metadata only: never constructs all chapter texts or a NoteStore. */
@@ -109,7 +111,7 @@ class BookStore(private val context: Context) {
         val file=File(root,"$id/reader.json")
         if(!file.exists() && !File(file.path+".bak").exists())return
         val data=readAtomic(file);check(data.getInt("schema")==1)
-        data.put("notes",JSONArray());data.remove("draft");writeAtomic(file,data)
+        data.put("notes",JSONArray());data.remove("draft");data.remove("draftEditingId");data.remove("deletedNote");writeAtomic(file,data)
     }
     /** Caller confirms deletion and releases the active reader before entering this transaction. */
     fun delete(id:String):Boolean {

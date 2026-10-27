@@ -36,8 +36,11 @@ class ReaderPreferencesTest {
             val updated = NoteStore(context, "test").data
             assertEquals(1.45, updated.getDouble("fontSize"), 0.0)
             assertEquals("readium-scale-v1", updated.getString("fontUnits"))
-            assertEquals(old.getJSONArray("notes").toString(), updated.getJSONArray("notes").toString())
-            assertEquals(old.getJSONObject("draft").toString(), updated.getJSONObject("draft").toString())
+            val promoted=JSONObject(updated.getJSONArray("notes").getJSONObject(0).toString())
+            assertEquals(2,promoted.remove("noteVersion"));assertEquals("yellow",promoted.remove("color"))
+            assertEquals(old.getJSONArray("notes").toString(),JSONArray().put(promoted).toString())
+            val draft=JSONObject(updated.getJSONObject("draft").toString());assertEquals(2,draft.remove("noteVersion"));assertEquals("yellow",draft.remove("color"))
+            assertEquals(old.getJSONObject("draft").toString(),draft.toString())
             assertEquals(old.getJSONObject("locator").toString(), updated.getJSONObject("locator").toString())
         } finally { root.deleteRecursively() }
     }

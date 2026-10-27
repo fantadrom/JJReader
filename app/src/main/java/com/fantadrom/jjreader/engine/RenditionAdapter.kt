@@ -60,7 +60,7 @@ class RenditionAdapter(val book:Book,val unified:UnifiedDocument?=null,val secti
         }
         return result
     }
-    internal fun port(nav:EpubNavigatorFragment,bridge:LocatorBridge,go:suspend(Int)->Boolean):ReaderPort = object:ReaderPort {
+    internal fun port(nav:EpubNavigatorFragment,bridge:LocatorBridge,prepare:(Int)->Unit={},reveal:suspend(Int,Long,String?)->Unit={_,_,_->},go:suspend(Int)->Boolean):ReaderPort = object:ReaderPort {
         var observed=0;var requested=0
         override val resolveMissingLocations get()=true
         override val sections get()=this@RenditionAdapter.sections
@@ -70,8 +70,9 @@ class RenditionAdapter(val book:Book,val unified:UnifiedDocument?=null,val secti
         override fun matches(state:JSONObject,index:Int):Boolean?=if(!continuous)null else state.optString("url").substringBefore('#').endsWith("/"+UnifiedDocument.HREF) && state.optInt("sourceChapter",-1)==index && state.optString("generation")==unified!!.generation
         override suspend fun context(index:Int):JSONObject? {requested=index;if(sections)bridge.call(nav,"JJ.enableSections()");return call(if(continuous)"JJ.forSection($index).context()"else"JJ.context()")}
         override suspend fun text()=if(continuous)bridge.call(nav,"({text:JJ.forSection($requested).text})")?.getString("text")else bridge.text(nav)
-        override suspend fun goResource(index:Int):Boolean {requested=index;return if(continuous)true else go(index)}
-        override suspend fun go(locator:Locator){if(!continuous)nav.go(locator,animated=false)}
+        override suspend fun goResource(index:Int):Boolean {requested=index;return if(continuous)true else {prepare(index);go(index)}}
+        override suspend fun go(locator:Locator){if(!continuous){val index=book.chapters.indexOfFirst{it.href.substringBefore('#')==locator.href.toString().substringBefore('#')};if(index>=0)prepare(index);nav.go(locator,animated=false)}}
+        override suspend fun present(index:Int,operation:Long,document:String?)=reveal(index,operation,document)
         override fun locator(anchor:JSONObject)=if(continuous)sourceLocator(requested,anchor)else bridge.locator(nav.currentLocator.value,anchor)
         override suspend fun call(expression:String):JSONObject? {
             val root=expression=="JJ.viewport()" || expression.startsWith("JJ.takeSelection")
